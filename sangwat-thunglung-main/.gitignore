@@ -15,3 +15,4 @@ node_modules
 .next/
 .DS_Storenext-env.d.ts
 *.tsbuildinfo
+out/

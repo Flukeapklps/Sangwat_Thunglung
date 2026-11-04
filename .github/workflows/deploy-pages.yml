@@ -1,0 +1,52 @@
+name: Deploy POS to GitHub Pages
+
+on:
+  push:
+    branches: [main, claude/compassionate-volta-jd0n8e]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: sangwat-thunglung-main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sangwat-thunglung-main/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: sangwat-thunglung-main/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Build static site
+        env:
+          # the site is served from https://<user>.github.io/<repo>/
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+        run: pnpm build && touch out/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: sangwat-thunglung-main/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
