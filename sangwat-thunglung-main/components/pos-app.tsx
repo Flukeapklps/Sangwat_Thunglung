@@ -207,6 +207,8 @@ export default function PosApp() {
     const box = readStorage<SheetAction[]>(KEYS.outbox, [])
     outbox.current = Array.isArray(box) ? box : []
     setHydrated(true)
+    // ask the browser not to evict our saved data (helps on iOS / Android)
+    try { void navigator.storage?.persist?.() } catch {}
     void syncNow()
     // keep several devices in step: refresh every minute while the page is visible
     const timer = window.setInterval(() => {
@@ -413,6 +415,17 @@ export default function PosApp() {
           </div>
         </header>
 
+        {hydrated && (sync === 'readonly' || sync === 'offline') && (
+          <div className="local-warning" role="status">
+            <Cloud size={18} />
+            <div>
+              <b>ตอนนี้ข้อมูลถูกเก็บไว้ในเบราว์เซอร์นี้เท่านั้น</b>
+              <small>คนอื่นที่เปิดลิงก์จะไม่เห็นออเดอร์ และข้อมูลอาจหายถ้าเปิดผ่านแอป LINE / Facebook หรือโหมดไม่ระบุตัวตน
+                ติดตั้งสคริปต์ Google Sheet เพื่อให้ทุกเครื่องเห็นข้อมูลเดียวกันและไม่หาย</small>
+            </div>
+            <button className="secondary" onClick={() => setSheetOpen(true)}>ตั้งค่า Google Sheet</button>
+          </div>
+        )}
         {!hydrated ? <p className="empty">กำลังโหลดข้อมูล...</p> : <>
           {tab === 'overview' && <Overview orders={orders} products={products} sync={sync} go={setTab} onAddProduct={() => { setTab('products'); setModal(null) }} onOpenOrder={openOrder} clearToday={() => askDelete(orders.filter((o) => inRange(o.createdAt, { from: todayKey(), to: todayKey() })), `ออเดอร์วันนี้ (${formatDateKey(todayKey())})`)} />}
           {tab === 'products' && <Products products={products} categories={categories} onAdd={() => setModal(null)} onEdit={setModal} onDelete={deleteProduct} />}
