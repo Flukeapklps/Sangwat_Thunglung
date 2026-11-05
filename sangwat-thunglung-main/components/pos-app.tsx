@@ -581,13 +581,14 @@ function Products({ products, categories, onAdd, onEdit, onDelete }: {
             </div>
             <div className="product-body">
               <div className="product-actions">
-                <span className="muted">{p.brand || 'SANGWAT'}</span>
+                {/* brand is the headline; product name sits underneath */}
+                <h3 className="product-brand">{p.brand?.trim() || p.name}</h3>
                 <div>
                   <button onClick={() => onEdit(p)} aria-label="แก้ไข"><Edit3 size={15} /></button>
                   <button onClick={() => onDelete(p)} aria-label="ลบ"><Trash2 size={15} /></button>
                 </div>
               </div>
-              <h3>{p.name}</h3>
+              {p.brand?.trim() && <p className="product-name">{p.name}</p>}
               <small className="category-label">{categoryOf(p)}</small>
               <div className="price-row"><b>฿{money(p.bagPrice)}</b><span>/ ถุง</span><b>฿{money(p.kgPrice)}</b><span>/ กก.</span></div>
               <div className="stock-row">

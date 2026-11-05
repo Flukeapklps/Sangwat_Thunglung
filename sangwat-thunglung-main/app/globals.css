@@ -70,3 +70,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .sheet-steps{font-size:12px;line-height:1.7;color:#5c6b62;padding-left:20px;margin:14px 0 8px}.sheet-steps code,.sheet-note code{background:#f0f2ed;border-radius:4px;padding:1px 5px;font-size:11px}
 .sheet-note{margin-top:10px;line-height:1.6}
 @media(max-width:520px){.insight-row.day{grid-template-columns:1fr 80px 28px}.insight-row.day>span.insight-num,.insight-row.day>strong.insight-num:nth-of-type(2){display:none}.date-summary{flex-direction:column;align-items:stretch}.date-actions button{flex:1;justify-content:center}}
+.product-actions{align-items:flex-start;gap:8px}.product-actions>div{flex:none}
+.product-body h3.product-brand{font-size:17px;font-weight:700;margin:0 0 4px;color:var(--ink);line-height:1.35}
+.product-name{font-size:13px;color:#8b948e;margin:0 0 10px}.product-actions+.category-label{margin-top:6px}
+.main{min-width:0}.category-tabs{max-width:100%}
+.search svg{flex:none}.search input{min-width:0}
