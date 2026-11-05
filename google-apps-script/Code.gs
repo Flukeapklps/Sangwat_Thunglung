@@ -12,6 +12,8 @@
 // ชื่อชีตสินค้า: ถ้าไม่พบชื่อใดในรายการนี้ จะใช้ชีตแรกของไฟล์
 var PRODUCT_SHEET_NAMES = ['สินค้า', 'Products', 'products', 'Product'];
 var ORDER_SHEET = 'ออเดอร์';
+var IMAGE_FOLDER = 'แสงวัฒน์ POS - รูปสินค้า'; // โฟลเดอร์ใน Google Drive ที่เก็บรูปสินค้า
+var VERSION = 3;
 var DAILY_SHEET = 'สรุปรายวัน';
 var CUSTOMER_SHEET = 'สรุปตามลูกค้า';
 
@@ -42,7 +44,7 @@ var ORDER_HEADERS = ['เลขที่ออเดอร์', 'createdAt', '�
 // ------------------------------------------------------------------ entry points
 
 function doGet() {
-  return json_({ ok: true, version: 2, products: readProducts_(), orders: readOrders_() });
+  return json_({ ok: true, version: VERSION, products: readProducts_(), orders: readOrders_() });
 }
 
 function doPost(e) {
@@ -55,11 +57,12 @@ function doPost(e) {
       case 'deleteOrders': deleteOrders_(action.ids || [], !!action.restock); break;
       case 'saveProduct': saveProduct_(action.product); break;
       case 'deleteProduct': deleteProduct_(action.id); break;
+      case 'setProductImage': setProductImage_(action.id, action.img); break;
       case 'ping': break;
       default: throw new Error('unknown action: ' + action.type);
     }
-    if (action.type !== 'saveProduct' && action.type !== 'deleteProduct' && action.type !== 'ping') rebuildSummaries_();
-    return json_({ ok: true, version: 2, products: readProducts_(), orders: readOrders_() });
+    if (['upsertOrders', 'deleteOrders'].indexOf(action.type) >= 0) rebuildSummaries_();
+    return json_({ ok: true, version: VERSION, products: readProducts_(), orders: readOrders_() });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   } finally {
@@ -80,6 +83,7 @@ function setup() {
   products.setColumnWidth(2, 200);
   orderSheet_();
   rebuildSummaries_();
+  imageFolder_(); // ขอสิทธิ์ Google Drive สำหรับเก็บรูปสินค้า
   SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(products);
 }
 
@@ -183,11 +187,44 @@ function saveProduct_(p) {
     if (field === 'status') v = stock > 0 ? 'มีสินค้า' : 'สินค้าหมด';
     else if (field === 'img') {
       v = String(p.img || '');
-      if (v.indexOf('data:') === 0 || v.length > 40000) return; // รูปที่อัปโหลดจากเครื่องเก็บในแอป ไม่เก็บในชีต
+      if (v.indexOf('data:') === 0) v = storeImage_(v, p.name); // รูปที่อัปโหลดจากเครื่อง → เก็บใน Google Drive แล้วใส่ลิงก์
+      if (v.length > 40000) return;
     } else v = p[field];
     if (v === undefined || v === null) v = NUMBER_FIELDS.indexOf(field) >= 0 ? 0 : '';
     sheet.getRange(row, cols[field] + 1).setValue(v);
   });
+}
+
+/** อัปโหลดรูปของสินค้าที่มีอยู่แล้ว (ใช้ตอนย้ายรูปเก่าจากเครื่องขึ้น Drive) แก้เฉพาะช่องรูป */
+function setProductImage_(id, img) {
+  var sheet = productSheet_();
+  var cols = productColumns_(sheet, true);
+  var row = findProductRow_(sheet, cols, id, null);
+  if (row < 0 || !img) return;
+  var cell = sheet.getRange(row, cols.img + 1);
+  if (String(cell.getValue()).trim() !== '') return; // มีรูปอยู่แล้ว ไม่ทับ
+  var url = String(img).indexOf('data:') === 0 ? storeImage_(img, id) : String(img);
+  if (url) cell.setValue(url);
+}
+
+function imageFolder_() {
+  var it = DriveApp.getFoldersByName(IMAGE_FOLDER);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(IMAGE_FOLDER);
+}
+
+/** บันทึกรูป (data URL) ลง Google Drive เปิดให้ทุกคนที่มีลิงก์ดูได้ และคืนลิงก์สำหรับแสดงในแอป */
+function storeImage_(dataUrl, name) {
+  var m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(String(dataUrl));
+  if (!m) return '';
+  var ext = m[1].split('/')[1].replace('jpeg', 'jpg');
+  var blob = Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], String(name || 'product').slice(0, 60) + '-' + Date.now() + '.' + ext);
+  var file = imageFolder_().createFile(blob);
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (err) {
+    // บางบัญชีองค์กรไม่อนุญาตให้แชร์สาธารณะ รูปจะยังถูกเก็บ แต่คนอื่นอาจเปิดไม่ได้
+  }
+  return 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w1000';
 }
 
 function deleteProduct_(id) {

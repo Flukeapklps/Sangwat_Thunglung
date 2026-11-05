@@ -6,17 +6,22 @@ export type SheetAction =
   | { type: 'deleteOrders'; ids: string[]; restock: boolean }
   | { type: 'saveProduct'; product: Product }
   | { type: 'deleteProduct'; id: string }
+  | { type: 'setProductImage'; id: string; img: string }
 
 /** full = new script (read + write), readonly = old script that only lists products */
 export type SheetMode = 'full' | 'readonly'
-export type SheetData = { mode: SheetMode; products: any[]; orders: any[] }
+export type SheetData = { mode: SheetMode; version: number; products: any[]; orders: any[] }
+
+/** the script answered but refused the action (bad data / old script) – retrying will not help */
+export class SheetRejected extends Error {}
 
 export const withDate = (o: Order) => ({ ...o, date: dateKeyOf(o.createdAt) })
 
 function parse(j: any): SheetData {
-  if (Array.isArray(j)) return { mode: 'readonly', products: j, orders: [] }
-  if (j && j.ok && Array.isArray(j.products)) return { mode: 'full', products: j.products, orders: Array.isArray(j.orders) ? j.orders : [] }
-  throw new Error((j && j.error) || 'รูปแบบข้อมูลจาก Google Sheet ไม่ถูกต้อง')
+  if (Array.isArray(j)) return { mode: 'readonly', version: 1, products: j, orders: [] }
+  if (j && j.ok && Array.isArray(j.products)) return { mode: 'full', version: Number(j.version) || 2, products: j.products, orders: Array.isArray(j.orders) ? j.orders : [] }
+  if (j && j.ok === false) throw new SheetRejected(String(j.error || 'rejected'))
+  throw new Error('รูปแบบข้อมูลจาก Google Sheet ไม่ถูกต้อง')
 }
 
 export async function fetchSheet(url: string): Promise<SheetData> {

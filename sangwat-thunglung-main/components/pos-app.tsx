@@ -11,7 +11,7 @@ import {
   readStorage, resolveImageUrl, round2, shiftDays, stockOf, summarize, todayKey, totalStock, type Unit, unitCostOf,
   unitLabel, unitPrice, withStatus, writeStorage,
 } from '@/lib/pos'
-import { fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, withDate } from '@/lib/sync'
+import { fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, SheetRejected, withDate } from '@/lib/sync'
 import { OrderDetailModal } from '@/components/order-detail'
 
 // the shop's shared Google Sheet – every device connects here automatically
@@ -82,6 +82,7 @@ export default function PosApp() {
   // sync bookkeeping lives in refs so async code always sees the latest values
   const outbox = useRef<SheetAction[]>([])
   const mode = useRef<SheetMode | null>(null)
+  const imageMigrations = useRef(new Set<string>())
   const flushing = useRef(false)
   const urlRef = useRef(DEFAULT_SHEET_URL)
   const deletedRef = useRef<string[]>([])
@@ -121,7 +122,13 @@ export default function PosApp() {
     try {
       while (outbox.current.length) {
         setSync('syncing')
-        last = await postSheet(urlRef.current, outbox.current[0])
+        try {
+          last = await postSheet(urlRef.current, outbox.current[0])
+        } catch (e) {
+          // the script refused this action: drop it so it cannot block everything queued after it
+          if (!(e instanceof SheetRejected)) throw e
+          console.warn('Google Sheet rejected', outbox.current[0].type, e.message)
+        }
         outbox.current = outbox.current.slice(1)
         saveOutbox()
       }
@@ -174,6 +181,17 @@ export default function PosApp() {
         outbox.current = [...first, ...outbox.current]
         saveOutbox()
         writeStorage(KEYS.linked, url)
+      }
+      // photos uploaded on this device before the sheet could store them: send them to Google Drive (script v3+)
+      if (data.version >= 3) {
+        const remoteImg = new Map(data.products.map((p: any) => [String(p.id), String(p.img ?? '').trim()]))
+        for (const p of readStorage<any[]>(KEYS.products, []).map(normalizeProduct)) {
+          if (p.img?.startsWith('data:') && remoteImg.has(p.id) && !remoteImg.get(p.id) && !imageMigrations.current.has(p.id)) {
+            imageMigrations.current.add(p.id)
+            outbox.current = [...outbox.current, { type: 'setProductImage', id: p.id, img: p.img }]
+          }
+        }
+        saveOutbox()
       }
       if (outbox.current.length) {
         await flush()
