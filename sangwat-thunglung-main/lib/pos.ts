@@ -152,13 +152,23 @@ export function mergeRemote(local: Product[], remote: Product[], deleted: Set<st
 }
 
 /** Turns Google Drive share links into a URL that can be shown in an <img>. */
-export function resolveImageUrl(url?: string) {
+const DRIVE_ID = /drive\.google\.com\/(?:file\/d\/|open\?(?:.*&)?id=|uc\?(?:.*&)?id=|thumbnail\?(?:.*&)?id=)([\w-]+)|googleusercontent\.com\/d\/([\w-]+)/
+
+/** Image URLs to try in order. Google Drive links get several forms because browsers block some of them. */
+export function imageCandidates(url?: string): string[] {
   const u = (url || '').trim()
-  if (!u) return ''
-  const m = u.match(/drive\.google\.com\/(?:file\/d\/|open\?(?:.*&)?id=|uc\?(?:.*&)?id=|thumbnail\?(?:.*&)?id=)([\w-]+)/)
-  if (m) return `https://drive.google.com/thumbnail?id=${m[1]}&sz=w1000`
-  return u
+  if (!u) return []
+  const m = u.match(DRIVE_ID)
+  const id = m && (m[1] || m[2])
+  if (id) return [
+    `https://lh3.googleusercontent.com/d/${id}=w1000`,
+    `https://drive.google.com/thumbnail?id=${id}&sz=w1000`,
+    `https://drive.google.com/uc?export=view&id=${id}`,
+  ]
+  return [u]
 }
+
+export const resolveImageUrl = (url?: string) => imageCandidates(url)[0] || ''
 
 /** Reads an image file and shrinks it so it fits comfortably in localStorage. */
 export function compressImage(file: File, maxSize = 800, quality = 0.82): Promise<string> {

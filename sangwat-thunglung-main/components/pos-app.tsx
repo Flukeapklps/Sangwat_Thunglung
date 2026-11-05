@@ -8,10 +8,10 @@ import {
 import {
   type Cart, categoryOf, compressImage, dailySummary, type DateRange, DEFAULT_CATEGORY, formatDateKey, formatDateTime,
   inRange, kgCost, mergeRemote, money, normalizeOrder, normalizeProduct, num, type Order, type OrderItem, type Product,
-  readStorage, resolveImageUrl, round2, shiftDays, stockOf, summarize, todayKey, totalStock, type Unit, unitCostOf,
+  imageCandidates, readStorage, round2, shiftDays, stockOf, summarize, todayKey, totalStock, type Unit, unitCostOf,
   unitLabel, unitPrice, withStatus, writeStorage,
 } from '@/lib/pos'
-import { fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, SheetRejected, withDate } from '@/lib/sync'
+import { type Diagnosis, diagnoseSheet, fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, SheetRejected, withDate } from '@/lib/sync'
 import { OrderDetailModal } from '@/components/order-detail'
 
 // the shop's shared Google Sheet – every device connects here automatically
@@ -76,6 +76,7 @@ export default function PosApp() {
   const [sync, setSync] = useState<SyncState>('syncing')
   const [sheetUrl, setSheetUrl] = useState(DEFAULT_SHEET_URL)
   const [lastSynced, setLastSynced] = useState<Date | null>(null)
+  const [sheetIssue, setSheetIssue] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const storageWarned = useRef(false)
 
@@ -124,10 +125,12 @@ export default function PosApp() {
         setSync('syncing')
         try {
           last = await postSheet(urlRef.current, outbox.current[0])
+          setSheetIssue(last.warnings.length ? last.warnings.join('\n') : null) // a clean save clears an old problem
         } catch (e) {
           // the script refused this action: drop it so it cannot block everything queued after it
           if (!(e instanceof SheetRejected)) throw e
           console.warn('Google Sheet rejected', outbox.current[0].type, e.message)
+          setSheetIssue(`Google Sheet ไม่รับข้อมูล: ${e.message}`)
         }
         outbox.current = outbox.current.slice(1)
         saveOutbox()
@@ -450,6 +453,17 @@ export default function PosApp() {
             <button className="secondary" onClick={() => setSheetOpen(true)}>ตั้งค่า Google Sheet</button>
           </div>
         )}
+        {sheetIssue && (
+          <div className="local-warning error" role="alert">
+            <ImageOff size={18} />
+            <div>
+              <b>มีปัญหาตอนบันทึกลง Google Sheet</b>
+              <small>{sheetIssue}</small>
+            </div>
+            <button className="secondary" onClick={() => setSheetOpen(true)}>ตรวจสอบ</button>
+            <button className="icon-btn" aria-label="ปิด" onClick={() => setSheetIssue(null)}><X size={14} /></button>
+          </div>
+        )}
         {!hydrated ? <p className="empty">กำลังโหลดข้อมูล...</p> : <>
           {tab === 'overview' && <Overview orders={orders} products={products} sync={sync} go={setTab} onAddProduct={() => { setTab('products'); setModal(null) }} onOpenOrder={openOrder} clearToday={() => askDelete(orders.filter((o) => inRange(o.createdAt, { from: todayKey(), to: todayKey() })), `ออเดอร์วันนี้ (${formatDateKey(todayKey())})`)} />}
           {tab === 'products' && <Products products={products} categories={categories} onAdd={() => setModal(null)} onEdit={setModal} onDelete={deleteProduct} />}
@@ -460,7 +474,7 @@ export default function PosApp() {
       {modal !== false && <ProductModal value={modal || undefined} categories={categories} onClose={() => setModal(false)} onSave={saveProduct} />}
       {detail && <OrderDetailModal order={detail.order} justCreated={detail.justCreated} customerTotals={customerTotals(detail.order.customer)} onClose={() => setDetail(null)} onDelete={detail.justCreated ? undefined : (o) => askDelete([o], `ออเดอร์ ${o.id} (${o.customer})`)} />}
       {deleteRequest && <DeleteOrdersModal request={deleteRequest} onCancel={() => setDeleteRequest(null)} onConfirm={(restock) => deleteOrders(deleteRequest.orders, restock)} />}
-      {sheetOpen && <SheetSettingsModal url={sheetUrl} defaultUrl={DEFAULT_SHEET_URL} sync={sync} syncText={syncText} lastSynced={lastSynced} onClose={() => setSheetOpen(false)} onSave={changeSheetUrl} onSync={() => syncNow()} />}
+      {sheetOpen && <SheetSettingsModal url={sheetUrl} defaultUrl={DEFAULT_SHEET_URL} issue={sheetIssue} sync={sync} syncText={syncText} lastSynced={lastSynced} onClose={() => setSheetOpen(false)} onSave={changeSheetUrl} onSync={() => syncNow()} />}
     </div>
   )
 }
@@ -472,11 +486,12 @@ function Stat({ label, value, sub, accent }: { label: string; value: string; sub
 }
 
 function ProductImage({ src, size = 32 }: { src?: string; size?: number }) {
-  const url = resolveImageUrl(src)
-  const [failed, setFailed] = useState<string | null>(null)
-  if (!url) return <Package size={size} />
-  if (failed === url) return <ImageOff size={size} />
-  return <img src={url} alt="" referrerPolicy="no-referrer" onError={() => setFailed(url)} />
+  const candidates = useMemo(() => imageCandidates(src), [src])
+  const [attempt, setAttempt] = useState({ src, index: 0 })
+  const index = attempt.src === src ? attempt.index : 0 // reset when the image changes
+  if (!candidates.length) return <Package size={size} />
+  if (index >= candidates.length) return <ImageOff size={size} />
+  return <img key={candidates[index]} src={candidates[index]} alt="" referrerPolicy="no-referrer" onError={() => setAttempt({ src, index: index + 1 })} />
 }
 
 function CategoryTabs({ categories, value, onChange, counts }: { categories: string[]; value: string; onChange: (c: string) => void; counts: Record<string, number> }) {
@@ -857,11 +872,37 @@ function DeleteOrdersModal({ request, onCancel, onConfirm }: { request: DeleteRe
   )
 }
 
-function SheetSettingsModal({ url, defaultUrl, sync, syncText, lastSynced, onClose, onSave, onSync }: {
-  url: string; defaultUrl: string; sync: SyncState; syncText: string; lastSynced: Date | null; onClose: () => void; onSave: (url: string) => Promise<void>; onSync: () => void
+function DiagnosisList({ d }: { d: Diagnosis | null | 'error' | 'old' }) {
+  if (d === 'error') return <p className="notice">เรียกสคริปต์ไม่สำเร็จ ตรวจว่า deploy เป็น "ทุกคน (Anyone)" และใช้ URL ที่ลงท้ายด้วย /exec</p>
+  if (d === 'old' || !d) return <p className="notice">สคริปต์ที่ใช้งานอยู่ยังเป็นเวอร์ชันเก่า: วางโค้ด Code.gs ล่าสุด → กด setup → <b>จัดการการทำให้ใช้งานได้ → แก้ไข → เวอร์ชันใหม่</b></p>
+  const row = (ok: boolean | undefined, label: string, detail?: string) => (
+    <li className={ok ? 'ok' : 'bad'}><b>{ok ? '✓' : '✗'}</b><span>{label}{detail && <small>{detail}</small>}</span></li>
+  )
+  return (
+    <ul className="diagnosis">
+      {row((d.version ?? 0) >= 4, `เวอร์ชันสคริปต์ ${d.version ?? '-'}`)}
+      {row(d.folderAccess, d.folderAccess ? `เข้าโฟลเดอร์รูปได้: ${d.folderName}` : 'เปิดโฟลเดอร์รูปที่ตั้งไว้ไม่ได้',
+        d.folderAccess ? undefined : `บัญชีที่ deploy สคริปต์ต้องเป็นเจ้าของหรือผู้แก้ไขโฟลเดอร์ (ตอนนี้ใช้โฟลเดอร์สำรอง: ${d.usingFolder ?? '-'})`)}
+      {row(d.canWrite, d.canWrite ? 'สร้างไฟล์รูปใน Drive ได้' : 'สร้างไฟล์ใน Drive ไม่ได้',
+        d.canWrite ? undefined : `${d.writeError ?? ''} → เปิด Apps Script แล้วกดเรียกใช้ setup เพื่ออนุญาตสิทธิ์ Google Drive จากนั้น deploy เวอร์ชันใหม่`)}
+      {row(d.canShare, d.canShare ? 'แชร์รูปให้ทุกคนที่มีลิงก์ดูได้' : 'แชร์ไฟล์แบบสาธารณะไม่ได้',
+        d.canShare ? undefined : `${d.shareError ?? ''} (บัญชีองค์กรอาจห้ามแชร์ — เครื่องอื่นจะไม่เห็นรูป)`)}
+      {row((d.productsWithImage ?? 0) > 0, `สินค้าที่มีรูปในชีต: ${d.productsWithImage ?? 0} จาก ${d.products ?? 0} รายการ`,
+        (d.productsWithImage ?? 0) > 0 ? undefined : 'ลองกดแก้ไขสินค้า → เลือกรูป → บันทึก แล้วกดตรวจสอบอีกครั้ง')}
+    </ul>
+  )
+}
+
+function SheetSettingsModal({ url, defaultUrl, issue, sync, syncText, lastSynced, onClose, onSave, onSync }: {
+  url: string; defaultUrl: string; issue: string | null; sync: SyncState; syncText: string; lastSynced: Date | null; onClose: () => void; onSave: (url: string) => Promise<void>; onSync: () => void
 }) {
   const [value, setValue] = useState(url)
   const [busy, setBusy] = useState(false)
+  const [diag, setDiag] = useState<Diagnosis | null | 'error' | 'old' | 'loading'>(null)
+  const runDiagnosis = async () => {
+    setDiag('loading')
+    try { setDiag((await diagnoseSheet(url)) ?? 'old') } catch { setDiag('error') }
+  }
   const valid = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec\/?$/.test(value.trim())
   const save = async () => {
     if (!valid) return alert('URL ต้องเป็นลิงก์ Web app ของ Apps Script เช่น https://script.google.com/macros/s/xxxx/exec')
@@ -883,6 +924,13 @@ function SheetSettingsModal({ url, defaultUrl, sync, syncText, lastSynced, onClo
           <p className="notice">สคริปต์ที่เชื่อมอยู่ตอนนี้ส่งรายการสินค้าให้แอปได้อย่างเดียว ออเดอร์ สต็อก และยอดขายจึงยังไม่ถูกบันทึกลงชีต
             ติดตั้งสคริปต์ใหม่ตามคู่มือด้านล่าง แล้วนำ URL ใหม่มาวางที่นี่</p>
         )}
+        {issue && <p className="notice error">{issue}</p>}
+        <div className="diag-box">
+          <div className="diag-head"><b>ตรวจระบบเก็บรูปสินค้า (Google Drive)</b>
+            <button className="secondary" onClick={runDiagnosis} disabled={diag === 'loading'}><RefreshCw size={14} /> {diag === 'loading' ? 'กำลังตรวจ...' : 'ตรวจสอบ'}</button>
+          </div>
+          {diag && diag !== 'loading' && <DiagnosisList d={diag} />}
+        </div>
         <div className="form-grid">
           <label className="wide">URL ของ Apps Script (Web app)<input value={value} onChange={(e) => setValue(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec" /></label>
         </div>

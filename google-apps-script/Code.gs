@@ -15,7 +15,8 @@ var ORDER_SHEET = 'ออเดอร์';
 // โฟลเดอร์ Google Drive ที่เก็บรูปสินค้า (ID จากลิงก์ drive.google.com/drive/folders/<ID>)
 var IMAGE_FOLDER_ID = '1Tva0JIfdJw6qOxY6Vj8l0FTjeUoxg9JS';
 var IMAGE_FOLDER = 'แสงวัฒน์ POS - รูปสินค้า'; // ใช้เมื่อเปิดโฟลเดอร์ด้านบนไม่ได้
-var VERSION = 3;
+var VERSION = 4;
+var WARNINGS = []; // ปัญหาที่ไม่ร้ายแรง (เช่น อัปโหลดรูปไม่ได้) ส่งกลับไปแสดงในแอป
 var DAILY_SHEET = 'สรุปรายวัน';
 var CUSTOMER_SHEET = 'สรุปตามลูกค้า';
 
@@ -45,13 +46,40 @@ var ORDER_HEADERS = ['เลขที่ออเดอร์', 'createdAt', '�
 
 // ------------------------------------------------------------------ entry points
 
-function doGet() {
+function doGet(e) {
+  // เปิด URL นี้ต่อท้ายด้วย ?diag=1 ในเบราว์เซอร์ เพื่อตรวจระบบเก็บรูป
+  if (e && e.parameter && e.parameter.diag) return json_(diagnose_());
   return json_({ ok: true, version: VERSION, products: readProducts_(), orders: readOrders_() });
+}
+
+/** ตรวจว่าสคริปต์เข้าโฟลเดอร์รูป สร้างไฟล์ และแชร์ไฟล์ได้หรือไม่ */
+function diagnose_() {
+  var r = { ok: true, version: VERSION, folderIdSetting: IMAGE_FOLDER_ID };
+  try {
+    var f = DriveApp.getFolderById(IMAGE_FOLDER_ID);
+    r.folderAccess = true; r.folderName = f.getName();
+  } catch (err) { r.folderAccess = false; r.folderError = String(err && err.message || err); }
+  try {
+    var folder = imageFolder_();
+    r.usingFolder = folder.getName(); r.usingFolderId = folder.getId();
+    var file = folder.createFile(Utilities.newBlob('test', 'text/plain', '_ทดสอบระบบรูป.txt'));
+    r.canWrite = true;
+    try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); r.canShare = true; }
+    catch (err) { r.canShare = false; r.shareError = String(err && err.message || err); }
+    file.setTrashed(true);
+  } catch (err) { r.canWrite = false; r.writeError = String(err && err.message || err); }
+  try {
+    var products = readProducts_();
+    r.products = products.length;
+    r.productsWithImage = products.filter(function (p) { return String(p.img || '').trim() !== ''; }).length;
+  } catch (err) { r.sheetError = String(err && err.message || err); }
+  return r;
 }
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
+  WARNINGS = [];
   try {
     var action = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     switch (action.type) {
@@ -64,7 +92,7 @@ function doPost(e) {
       default: throw new Error('unknown action: ' + action.type);
     }
     if (['upsertOrders', 'deleteOrders'].indexOf(action.type) >= 0) rebuildSummaries_();
-    return json_({ ok: true, version: VERSION, products: readProducts_(), orders: readOrders_() });
+    return json_({ ok: true, version: VERSION, warnings: WARNINGS, products: readProducts_(), orders: readOrders_() });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   } finally {
@@ -192,8 +220,13 @@ function saveProduct_(p) {
       if (v.indexOf('data:') === 0) {
         // รูปที่อัปโหลดจากเครื่อง → เก็บใน Google Drive แล้วใส่ลิงก์ (รูปเก่าของสินค้านี้ย้ายไปถังขยะ)
         var oldUrl = String(sheet.getRange(row, cols.img + 1).getValue());
-        v = storeImage_(v, p.name, p.brand);
-        if (v) trashImage_(oldUrl);
+        try {
+          v = storeImage_(v, p.name, p.brand);
+          if (v) trashImage_(oldUrl);
+        } catch (err) {
+          WARNINGS.push('อัปโหลดรูป "' + p.name + '" ไปที่ Google Drive ไม่สำเร็จ: ' + String(err && err.message || err));
+          return; // บันทึกข้อมูลสินค้าอื่นตามปกติ ข้ามเฉพาะรูป
+        }
       }
       if (v.length > 40000) return;
     } else v = p[field];
@@ -212,7 +245,13 @@ function setProductImage_(id, img) {
   if (String(cell.getValue()).trim() !== '') return; // มีรูปอยู่แล้ว ไม่ทับ
   var name = String(sheet.getRange(row, cols.name + 1).getValue());
   var brand = cols.brand !== undefined ? String(sheet.getRange(row, cols.brand + 1).getValue()) : '';
-  var url = String(img).indexOf('data:') === 0 ? storeImage_(img, name, brand) : String(img);
+  var url;
+  try {
+    url = String(img).indexOf('data:') === 0 ? storeImage_(img, name, brand) : String(img);
+  } catch (err) {
+    WARNINGS.push('อัปโหลดรูป "' + name + '" ไปที่ Google Drive ไม่สำเร็จ: ' + String(err && err.message || err));
+    return;
+  }
   if (url) cell.setValue(url);
 }
 
