@@ -99,7 +99,8 @@ export function normalizeProduct(raw: any): Product {
     cost,
     labor,
     freight,
-    unitCost: rawUnitCost !== undefined && rawUnitCost !== '' ? num(rawUnitCost) : cost + labor + freight,
+    // an empty / zero unitCost column falls back to cost + labor + freight
+    unitCost: num(rawUnitCost) > 0 ? num(rawUnitCost) : cost + labor + freight,
     kgPerBag: num(raw.kgPerBag ?? raw.bagSize ?? raw.weight),
     bagPrice: num(raw.bagPrice ?? raw.retailPrice),
     kgPrice: num(raw.kgPrice ?? raw.pricePerKg),
@@ -208,16 +209,6 @@ export function writeStorage(key: string, value: unknown): boolean {
   }
 }
 
-export type Period = 'all' | 'today' | 'week' | 'month'
-
-export function inPeriod(iso: string, period: Period, now = new Date()) {
-  if (period === 'all') return true
-  const d = new Date(iso)
-  if (period === 'today') return d.toDateString() === now.toDateString()
-  if (period === 'week') return now.getTime() - d.getTime() <= 7 * 24 * 60 * 60 * 1000
-  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()
-}
-
 export type Summary = { key: string; orders: number; revenue: number; cost: number; profit: number }
 
 export function summarize(orders: Order[], keyOf: (o: Order) => string): Summary[] {
@@ -236,3 +227,28 @@ export function summarize(orders: Order[], keyOf: (o: Order) => string): Summary
 
 export const formatDateTime = (iso: string) =>
   new Date(iso).toLocaleString('th-TH', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+
+// ---------------------------------------------------------------- dates (local time, YYYY-MM-DD)
+
+const pad = (n: number) => String(n).padStart(2, '0')
+export const toDateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+export const dateKeyOf = (iso: string) => toDateKey(new Date(iso))
+export const todayKey = () => toDateKey(new Date())
+export function shiftDays(key: string, days: number) {
+  const [y, m, d] = key.split('-').map(Number)
+  return toDateKey(new Date(y, m - 1, d + days))
+}
+export const formatDateKey = (key: string, opts: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) => {
+  const [y, m, d] = key.split('-').map(Number)
+  return new Intl.DateTimeFormat('th-TH', opts).format(new Date(y, m - 1, d))
+}
+
+export type DateRange = { from: string; to: string } // inclusive, '' = open-ended
+export const inRange = (iso: string, r: DateRange) => {
+  const k = dateKeyOf(iso)
+  return (!r.from || k >= r.from) && (!r.to || k <= r.to)
+}
+
+export function dailySummary(orders: Order[]): Summary[] {
+  return summarize(orders, (o) => dateKeyOf(o.createdAt)).sort((a, b) => b.key.localeCompare(a.key))
+}

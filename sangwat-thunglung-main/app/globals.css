@@ -53,3 +53,20 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .shop-menu{position:relative}.shop-menu-pop{position:absolute;right:0;top:calc(100% + 8px);width:250px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 30px #20362c26;padding:8px;z-index:4;display:grid;gap:2px}
 .shop-menu-head{display:flex;gap:10px;align-items:center;padding:8px 8px 10px;border-bottom:1px solid var(--line);margin-bottom:4px;color:#315e49}.shop-menu-head b,.shop-menu-head small{display:block}.shop-menu-head b{font-size:13px;color:var(--ink)}.shop-menu-head small{font-size:10px;color:#9aa39d;margin-top:3px}
 .shop-menu-pop .connection{padding:6px 8px}.shop-menu-pop button{border:0;background:none;display:flex;align-items:center;gap:10px;padding:10px 8px;border-radius:8px;color:#5c6b62;font-size:12px;text-align:left;cursor:pointer;font-family:inherit}.shop-menu-pop button:hover{background:#f4f6f1}
+/* ---- dates, delete dialog, google sheet ---- */
+.connection.readonly i,.connection.pending i{background:#e2b552}
+.date-panel{display:grid;gap:12px;margin-bottom:4px}
+.date-presets{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:#9aa39d}.date-presets button{border:1px solid var(--line);background:#fff;color:#5c6b62;border-radius:30px;padding:7px 13px;font-size:12px;cursor:pointer;font-family:inherit}.date-presets button.active{background:#315e49;border-color:#315e49;color:#fff}
+.date-inputs{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}.date-inputs label{display:grid;gap:5px;font-size:11px;color:#77847b}.date-inputs input{border:1px solid #e1e6df;border-radius:7px;padding:8px 10px;font-size:13px;font-family:inherit;background:#fff;color:var(--ink)}
+.icon-btn{width:34px;height:34px;display:grid;place-items:center;border:1px solid #e1e6df;background:#fff;border-radius:7px;color:#56715e;cursor:pointer;flex:none}.icon-btn.danger{color:#b4553f;border-color:transparent;background:none;width:28px;height:28px}.icon-btn.danger:hover{background:#f9e4df}
+.date-summary{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:12px}.date-summary>b{font-size:14px;color:#315e49}.date-actions{display:flex;gap:8px;flex-wrap:wrap}
+.insight-head.day{grid-template-columns:1fr 50px 95px 95px 28px;padding-left:0}
+.insight-row.day{grid-template-columns:1fr 50px 95px 95px 28px}.day-link{border:0;background:none;padding:0;text-align:left;display:grid;gap:5px;cursor:pointer;font:inherit;color:inherit;min-width:0}.day-link b{font-size:12px}.day-link:hover b{color:#315e49;text-decoration:underline}
+.modal-small{width:min(460px,100%)}.delete-summary{font-size:13px;line-height:1.7;background:#fbfcf9;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+.check{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer;margin-bottom:12px}.check input{margin-top:3px;width:16px;height:16px;accent-color:#315e49}.check b,.check small{display:block}.check b{font-size:13px}.check small{font-size:11px;color:#8b948e;margin-top:3px;line-height:1.5}
+.danger-fill{background:#b4553f}
+.sheet-status{display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:#fbfcf9}.sheet-status .connection{padding:0}.sheet-status small{font-size:11px;color:#9aa39d}
+.notice{font-size:12px;line-height:1.6;background:#fbf6ea;border:1px solid #ecd9ad;color:#7d5c1c;border-radius:10px;padding:10px 12px}
+.sheet-steps{font-size:12px;line-height:1.7;color:#5c6b62;padding-left:20px;margin:14px 0 8px}.sheet-steps code,.sheet-note code{background:#f0f2ed;border-radius:4px;padding:1px 5px;font-size:11px}
+.sheet-note{margin-top:10px;line-height:1.6}
+@media(max-width:520px){.insight-row.day{grid-template-columns:1fr 80px 28px}.insight-row.day>span.insight-num,.insight-row.day>strong.insight-num:nth-of-type(2){display:none}.date-summary{flex-direction:column;align-items:stretch}.date-actions button{flex:1;justify-content:center}}

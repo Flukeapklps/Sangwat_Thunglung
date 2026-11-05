@@ -2,18 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BarChart3, ChevronRight, CirclePlus, Download, Edit3, FileUp, ImageOff, LayoutDashboard, Minus, Package,
-  PackagePlus, Plus, Search, ShoppingCart, Store, Trash2, Upload, X,
+  BarChart3, CalendarDays, ChevronLeft, ChevronRight, CirclePlus, Cloud, Download, Edit3, FileSpreadsheet, FileUp, ImageOff,
+  LayoutDashboard, Minus, Package, PackagePlus, Plus, RefreshCw, Search, Settings, ShoppingCart, Store, Trash2, Upload, X,
 } from 'lucide-react'
 import {
-  type Cart, categoryOf, compressImage, DEFAULT_CATEGORY, formatDateTime, inPeriod, kgCost, mergeRemote, money,
-  normalizeOrder, normalizeProduct, num, type Order, type OrderItem, type Period, type Product, readStorage,
-  resolveImageUrl, round2, stockOf, summarize, totalStock, type Unit, unitCostOf, unitLabel, unitPrice, withStatus,
-  writeStorage,
+  type Cart, categoryOf, compressImage, dailySummary, type DateRange, DEFAULT_CATEGORY, formatDateKey, formatDateTime,
+  inRange, kgCost, mergeRemote, money, normalizeOrder, normalizeProduct, num, type Order, type OrderItem, type Product,
+  readStorage, resolveImageUrl, round2, shiftDays, stockOf, summarize, todayKey, totalStock, type Unit, unitCostOf,
+  unitLabel, unitPrice, withStatus, writeStorage,
 } from '@/lib/pos'
+import { fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, withDate } from '@/lib/sync'
 import { OrderDetailModal } from '@/components/order-detail'
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbwzkCcKnFFNy14eRcWJbv2aXXmiol8dK1eJg5r0pMdaKAhYbpgq6ugFoGcLX3K3qKJq/exec'
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwzkCcKnFFNy14eRcWJbv2aXXmiol8dK1eJg5r0pMdaKAhYbpgq6ugFoGcLX3K3qKJq/exec'
+const SETUP_GUIDE_URL = 'https://github.com/Flukeapklps/Sangwat_Thunglung/blob/main/google-apps-script/README.md'
 const LOGO_URL = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/sangwat%20logo-QtbMkseg5dRbmauJvFdCVl767RO672.png'
 const HIDDEN_STARTER_NAMES = new Set(['ข้าวหอมมะลิ 5 กก.', 'ข้าวขาวเสาไห้ 5 กก.', 'ข้าวเหนียวเขี้ยวงู 5 กก.', 'ข้าวกล้องหอมมะลิ 1 กก.', 'ข้าวไรซ์เบอร์รี่ 1 กก.'])
 
@@ -22,14 +24,38 @@ const KEYS = {
   overrides: 'sangwat-product-overrides', // legacy – migrated into products on load
   deleted: 'sangwat-deleted-products',
   orders: 'sangwat-orders',
+  sheetUrl: 'sangwat-sheet-url',
+  outbox: 'sangwat-sheet-outbox',
+  linked: 'sangwat-sheet-linked', // url of the sheet that already received the local data
 }
 
 type Tab = 'overview' | 'products' | 'orders' | 'insights'
-type SyncState = 'syncing' | 'online' | 'offline'
+type SyncState = 'syncing' | 'online' | 'readonly' | 'pending' | 'offline'
 type Detail = { order: Order; justCreated?: boolean }
+type DeleteRequest = { orders: Order[]; title: string }
 
 const isVisible = (p: Product) => !!p.name && !HIDDEN_STARTER_NAMES.has(p.name)
 const uniqueCategories = (products: Product[]) => [...new Set(products.map(categoryOf))].sort((a, b) => a.localeCompare(b, 'th'))
+const SYNC_TEXT: Record<SyncState, string> = {
+  syncing: 'กำลังซิงก์กับ Google Sheet...',
+  online: 'ซิงก์กับ Google Sheet แล้ว',
+  readonly: 'Google Sheet: อ่านสินค้าได้อย่างเดียว (ยังไม่ได้ติดตั้งสคริปต์ใหม่)',
+  pending: 'มีข้อมูลรอส่งขึ้น Google Sheet',
+  offline: 'เชื่อมต่อ Google Sheet ไม่สำเร็จ (ใช้ข้อมูลในเครื่อง)',
+}
+
+function returnStock(products: Product[], orders: Order[]) {
+  const back = new Map<string, { bag: number; kg: number }>()
+  for (const o of orders) for (const i of o.items) {
+    const b = back.get(i.id) || { bag: 0, kg: 0 }
+    b[i.unit] += i.qty
+    back.set(i.id, b)
+  }
+  return products.map((p) => {
+    const b = back.get(p.id)
+    return b ? withStatus({ ...p, bagStock: p.bagStock + b.bag, kgStock: p.kgStock + b.kg, updatedAt: Date.now() }) : p
+  })
+}
 
 export default function PosApp() {
   const [hydrated, setHydrated] = useState(false)
@@ -40,11 +66,124 @@ export default function PosApp() {
   const [cart, setCart] = useState<Cart>({})
   const [customer, setCustomer] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const [sheetOpen, setSheetOpen] = useState(false)
   const [modal, setModal] = useState<Product | null | false>(false)
   const [detail, setDetail] = useState<Detail | null>(null)
+  const [deleteRequest, setDeleteRequest] = useState<DeleteRequest | null>(null)
   const [sync, setSync] = useState<SyncState>('syncing')
+  const [sheetUrl, setSheetUrl] = useState(DEFAULT_SHEET_URL)
+  const [lastSynced, setLastSynced] = useState<Date | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const storageWarned = useRef(false)
+
+  // sync bookkeeping lives in refs so async code always sees the latest values
+  const outbox = useRef<SheetAction[]>([])
+  const mode = useRef<SheetMode | null>(null)
+  const flushing = useRef(false)
+  const urlRef = useRef(DEFAULT_SHEET_URL)
+  const deletedRef = useRef<string[]>([])
+  deletedRef.current = deleted
+
+  // ---- persist (only after the initial load, so we never overwrite stored data with empty state)
+  const persist = useCallback((key: string, value: unknown) => {
+    if (!writeStorage(key, value) && !storageWarned.current) {
+      storageWarned.current = true
+      alert('พื้นที่จัดเก็บข้อมูลในเบราว์เซอร์เต็ม กรุณาสำรองข้อมูล หรือใช้รูปภาพขนาดเล็กลง / ใช้ URL รูปแทน')
+    }
+  }, [])
+  useEffect(() => { if (hydrated) { persist(KEYS.products, products); try { localStorage.removeItem(KEYS.overrides) } catch {} } }, [products, hydrated, persist])
+  useEffect(() => { if (hydrated) persist(KEYS.orders, orders) }, [orders, hydrated, persist])
+  useEffect(() => { if (hydrated) persist(KEYS.deleted, deleted) }, [deleted, hydrated, persist])
+
+  // ---- Google Sheet sync
+  const applyFull = useCallback((data: SheetData) => {
+    const remote = data.products.map(normalizeProduct).filter(isVisible)
+    setProducts((prev) => {
+      const local = new Map(prev.map((p) => [p.id, p]))
+      // the sheet does not store photos uploaded from the device, keep them locally
+      return remote.map((r) => { const l = local.get(r.id); return withStatus({ ...r, img: r.img || l?.img || '' }) })
+    })
+    setOrders(data.orders.map(normalizeOrder).sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
+    setDeleted([])
+  }, [])
+
+  const saveOutbox = useCallback(() => {
+    writeStorage(KEYS.outbox, outbox.current)
+  }, [])
+
+  const flush = useCallback(async () => {
+    if (flushing.current || mode.current !== 'full') return
+    flushing.current = true
+    let last: SheetData | null = null
+    try {
+      while (outbox.current.length) {
+        setSync('syncing')
+        last = await postSheet(urlRef.current, outbox.current[0])
+        outbox.current = outbox.current.slice(1)
+        saveOutbox()
+      }
+      if (last) applyFull(last)
+      setSync('online')
+      setLastSynced(new Date())
+    } catch {
+      setSync(outbox.current.length ? 'pending' : 'offline')
+    } finally {
+      flushing.current = false
+    }
+  }, [applyFull, saveOutbox])
+
+  const enqueue = useCallback((action: SheetAction) => {
+    if (mode.current === 'readonly') return // old script cannot store anything
+    outbox.current = [...outbox.current, action]
+    saveOutbox()
+    void flush()
+  }, [flush, saveOutbox])
+
+  const syncNow = useCallback(async (opts: { silent?: boolean } = {}) => {
+    if (flushing.current) return
+    if (!opts.silent) setSync('syncing')
+    try {
+      const url = urlRef.current
+      const data = await fetchSheet(url)
+      mode.current = data.mode
+      if (data.mode === 'readonly') {
+        outbox.current = []
+        saveOutbox()
+        const remote = data.products.map(normalizeProduct).filter(isVisible)
+        setProducts((prev) => mergeRemote(prev, remote, new Set(deletedRef.current)))
+        setSync('readonly')
+        setLastSynced(new Date())
+        return
+      }
+      // first connection to this sheet: upload what was recorded on this device so nothing is lost
+      if (readStorage<string>(KEYS.linked, '') !== url) {
+        const remoteOrderIds = new Set(data.orders.map((o: any) => String(o.id)))
+        const localOrders = readStorage<any[]>(KEYS.orders, []).map(normalizeOrder).filter((o) => !remoteOrderIds.has(o.id))
+        const remoteProductIds = new Set(data.products.map((p: any) => String(p.id)))
+        const localProducts = readStorage<any[]>(KEYS.products, []).map(normalizeProduct)
+          .filter((p) => isVisible(p) && (p.updatedAt || !remoteProductIds.has(p.id)) && !deletedRef.current.includes(p.id))
+        const first: SheetAction[] = [
+          ...localProducts.map((p) => ({ type: 'saveProduct' as const, product: p })),
+          ...(localOrders.length ? [{ type: 'upsertOrders' as const, orders: localOrders.map(withDate), deductStock: false }] : []),
+          ...deletedRef.current.map((id) => ({ type: 'deleteProduct' as const, id })),
+        ]
+        outbox.current = [...first, ...outbox.current]
+        saveOutbox()
+        writeStorage(KEYS.linked, url)
+      }
+      if (outbox.current.length) {
+        await flush()
+        if (outbox.current.length) return
+        applyFull(await fetchSheet(url))
+      } else {
+        applyFull(data)
+      }
+      setSync('online')
+      setLastSynced(new Date())
+    } catch {
+      setSync(outbox.current.length ? 'pending' : 'offline')
+    }
+  }, [applyFull, flush, saveOutbox])
 
   // ---- load from localStorage after mount (avoids SSR hydration mismatch), then sync Google Sheet
   useEffect(() => {
@@ -56,37 +195,36 @@ export default function PosApp() {
       byId.set(p.id, p)
     }
     for (const [id, raw] of Object.entries(overrides || {})) byId.set(id, { ...normalizeProduct(raw), updatedAt: Date.now() })
-    const local = [...byId.values()].filter(isVisible)
+    setProducts([...byId.values()].filter(isVisible))
     const deletedIds = readStorage<string[]>(KEYS.deleted, [])
-    setProducts(local)
     setDeleted(Array.isArray(deletedIds) ? deletedIds : [])
+    deletedRef.current = Array.isArray(deletedIds) ? deletedIds : []
     const storedOrders = readStorage<any[]>(KEYS.orders, [])
     setOrders((Array.isArray(storedOrders) ? storedOrders : []).map(normalizeOrder))
+    const url = readStorage<string>(KEYS.sheetUrl, DEFAULT_SHEET_URL) || DEFAULT_SHEET_URL
+    urlRef.current = url
+    setSheetUrl(url)
+    const box = readStorage<SheetAction[]>(KEYS.outbox, [])
+    outbox.current = Array.isArray(box) ? box : []
     setHydrated(true)
+    void syncNow()
+    // keep several devices in step: refresh every minute while the page is visible
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && mode.current === 'full' && !outbox.current.length) void syncNow({ silent: true })
+    }, 60000)
+    const online = () => void syncNow()
+    window.addEventListener('online', online)
+    return () => { window.clearInterval(timer); window.removeEventListener('online', online) }
+  }, [syncNow])
 
-    let cancelled = false
-    fetch(GAS_URL)
-      .then((r) => r.json())
-      .then((rows: any) => {
-        if (cancelled || !Array.isArray(rows)) throw new Error('bad-response')
-        const remote = rows.map(normalizeProduct).filter(isVisible)
-        setProducts((prev) => mergeRemote(prev, remote, new Set(deletedIds)))
-        setSync('online')
-      })
-      .catch(() => !cancelled && setSync('offline'))
-    return () => { cancelled = true }
-  }, [])
-
-  // ---- persist (only after the initial load, so we never overwrite stored data with empty state)
-  const persist = useCallback((key: string, value: unknown) => {
-    if (!writeStorage(key, value) && !storageWarned.current) {
-      storageWarned.current = true
-      alert('พื้นที่จัดเก็บข้อมูลในเบราว์เซอร์เต็ม กรุณาส่งออกข้อมูลสำรอง หรือใช้รูปภาพขนาดเล็กลง / ใช้ URL รูปแทน')
-    }
-  }, [])
-  useEffect(() => { if (hydrated) { persist(KEYS.products, products); try { localStorage.removeItem(KEYS.overrides) } catch {} } }, [products, hydrated, persist])
-  useEffect(() => { if (hydrated) persist(KEYS.orders, orders) }, [orders, hydrated, persist])
-  useEffect(() => { if (hydrated) persist(KEYS.deleted, deleted) }, [deleted, hydrated, persist])
+  const changeSheetUrl = async (url: string) => {
+    const clean = url.trim() || DEFAULT_SHEET_URL
+    urlRef.current = clean
+    setSheetUrl(clean)
+    writeStorage(KEYS.sheetUrl, clean)
+    mode.current = null
+    await syncNow()
+  }
 
   const categories = useMemo(() => uniqueCategories(products), [products])
   const customers = useMemo(() => [...new Set(orders.map((o) => o.customer))].filter(Boolean), [orders])
@@ -135,32 +273,25 @@ export default function PosApp() {
     const cost = round2(cartItems.reduce((s, i) => s + i.cost * i.qty, 0))
     const order: Order = { id: `POS-${Date.now()}`, customer: name, createdAt: new Date().toISOString(), items: cartItems, total, cost, profit: round2(total - cost) }
 
-    const nextOrders = [order, ...orders]
-    setOrders(nextOrders)
+    setOrders((xs) => [order, ...xs])
     // deduct stock immediately; status flips to "out of stock" automatically when it reaches 0
     setProducts((ps) => ps.map((p) => {
       const q = cart[p.id]
       if (!q) return p
       return withStatus({ ...p, bagStock: p.bagStock - (q.bag || 0), kgStock: p.kgStock - (q.kg || 0), updatedAt: Date.now() })
     }))
+    enqueue({ type: 'upsertOrders', orders: [withDate(order)], deductStock: true })
     setCart({})
     setCustomer('')
     setDetail({ order, justCreated: true })
   }
 
-  const deleteOrder = (o: Order) => {
-    if (!confirm(`ลบออเดอร์ ${o.id} ของ ${o.customer} หรือไม่?`)) return
-    const restock = confirm('คืนสินค้าในออเดอร์นี้กลับเข้าสต็อกด้วยหรือไม่?')
-    setOrders((xs) => xs.filter((x) => x.id !== o.id))
-    if (restock) {
-      setProducts((ps) => ps.map((p) => {
-        const items = o.items.filter((i) => i.id === p.id)
-        if (!items.length) return p
-        const bag = items.filter((i) => i.unit === 'bag').reduce((s, i) => s + i.qty, 0)
-        const kg = items.filter((i) => i.unit === 'kg').reduce((s, i) => s + i.qty, 0)
-        return withStatus({ ...p, bagStock: p.bagStock + bag, kgStock: p.kgStock + kg, updatedAt: Date.now() })
-      }))
-    }
+  const deleteOrders = (list: Order[], restock: boolean) => {
+    const ids = new Set(list.map((o) => o.id))
+    setOrders((xs) => xs.filter((x) => !ids.has(x.id)))
+    if (restock) setProducts((ps) => returnStock(ps, list))
+    enqueue({ type: 'deleteOrders', ids: [...ids], restock })
+    setDeleteRequest(null)
     setDetail(null)
   }
 
@@ -168,6 +299,7 @@ export default function PosApp() {
     const saved = withStatus({ ...p, category: categoryOf(p), updatedAt: Date.now() })
     setProducts((xs) => (xs.some((x) => x.id === saved.id) ? xs.map((x) => (x.id === saved.id ? saved : x)) : [saved, ...xs]))
     setDeleted((d) => d.filter((id) => id !== saved.id))
+    enqueue({ type: 'saveProduct', product: saved })
     setModal(false)
   }
 
@@ -176,16 +308,27 @@ export default function PosApp() {
     setProducts((xs) => xs.filter((x) => x.id !== p.id))
     setDeleted((d) => [...new Set([...d, p.id])])
     setCart((c) => { const copy = { ...c }; delete copy[p.id]; return copy })
+    enqueue({ type: 'deleteProduct', id: p.id })
   }
 
-  const exportData = () => {
+  const backupData = () => {
     const blob = new Blob([JSON.stringify({ products, orders }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `sangwat-pos-${new Date().toISOString().slice(0, 10)}.json`
+    a.download = `sangwat-backup-${todayKey()}.json`
     a.click()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  const downloadReport = async (list: Order[] = orders, label = `all-${todayKey()}`) => {
+    try {
+      const { downloadExcelReport } = await import('@/lib/report')
+      await downloadExcelReport(list, products, label)
+    } catch (e) {
+      console.error(e)
+      alert('ไม่สามารถสร้างไฟล์ Excel ได้ กรุณาลองใหม่')
+    }
   }
 
   const importData = (file: File) => {
@@ -194,8 +337,16 @@ export default function PosApp() {
       try {
         const d = JSON.parse(String(r.result))
         if (!Array.isArray(d.products) && !Array.isArray(d.orders)) throw new Error('invalid')
-        if (Array.isArray(d.products)) setProducts(d.products.map((x: any) => ({ ...normalizeProduct(x), updatedAt: Date.now() })).filter(isVisible))
-        if (Array.isArray(d.orders)) setOrders(d.orders.map(normalizeOrder))
+        if (Array.isArray(d.products)) {
+          const list: Product[] = d.products.map((x: any) => ({ ...normalizeProduct(x), updatedAt: Date.now() })).filter(isVisible)
+          setProducts(list)
+          list.forEach((p) => enqueue({ type: 'saveProduct', product: p }))
+        }
+        if (Array.isArray(d.orders)) {
+          const list: Order[] = d.orders.map(normalizeOrder)
+          setOrders(list)
+          if (list.length) enqueue({ type: 'upsertOrders', orders: list.map(withDate), deductStock: false })
+        }
         alert('นำเข้าข้อมูลเรียบร้อย')
       } catch {
         alert('ไฟล์สำรองไม่ถูกต้อง')
@@ -204,8 +355,9 @@ export default function PosApp() {
     r.readAsText(file)
   }
 
-  const clearToday = () => {
-    if (confirm('ล้างออเดอร์ของวันนี้ทั้งหมดหรือไม่? (สต็อกจะไม่ถูกคืน)')) setOrders((xs) => xs.filter((o) => !inPeriod(o.createdAt, 'today')))
+  const askDelete = (list: Order[], title: string) => {
+    if (!list.length) return alert('ไม่มีออเดอร์ให้ลบ')
+    setDeleteRequest({ orders: list, title })
   }
 
   const openOrder = (o: Order) => setDetail({ order: o })
@@ -217,7 +369,7 @@ export default function PosApp() {
     ['orders', 'สร้างออเดอร์', ShoppingCart],
     ['insights', 'ยอดขาย & กำไร', BarChart3],
   ]
-  const syncText = sync === 'syncing' ? 'กำลังเชื่อมต่อ Google Sheet' : sync === 'online' ? 'เชื่อมต่อ Google Sheet แล้ว' : 'เชื่อมต่อ Google Sheet ไม่สำเร็จ'
+  const syncText = SYNC_TEXT[sync]
 
   return (
     <div className="pos-shell">
@@ -233,10 +385,10 @@ export default function PosApp() {
         </nav>
         <div className="sidebar-bottom">
           <span className={`connection ${sync}`}><i /> {syncText}</span>
-          <button onClick={exportData}><Download size={16} /> ส่งออกข้อมูล</button>
-          <button onClick={() => fileRef.current?.click()}><FileUp size={16} /> นำเข้าข้อมูล</button>
-          <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) importData(f); e.target.value = '' }} />
+          <button onClick={() => downloadReport()}><FileSpreadsheet size={16} /> ดาวน์โหลดรายงาน Excel</button>
+          <button onClick={() => setSheetOpen(true)}><Cloud size={16} /> ตั้งค่า Google Sheet</button>
         </div>
+        <input ref={fileRef} hidden type="file" accept=".json,application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) importData(f); e.target.value = '' }} />
       </aside>
       <main className="main">
         <header>
@@ -252,21 +404,26 @@ export default function PosApp() {
               syncText={syncText}
               productCount={products.length}
               orderCount={orders.length}
-              onExport={exportData}
+              onSync={() => syncNow()}
+              onSheet={() => setSheetOpen(true)}
+              onReport={() => downloadReport()}
+              onBackup={backupData}
               onImport={() => fileRef.current?.click()}
             />
           </div>
         </header>
 
         {!hydrated ? <p className="empty">กำลังโหลดข้อมูล...</p> : <>
-          {tab === 'overview' && <Overview orders={orders} products={products} sync={sync} go={setTab} onAddProduct={() => { setTab('products'); setModal(null) }} onOpenOrder={openOrder} clearToday={clearToday} />}
+          {tab === 'overview' && <Overview orders={orders} products={products} sync={sync} go={setTab} onAddProduct={() => { setTab('products'); setModal(null) }} onOpenOrder={openOrder} clearToday={() => askDelete(orders.filter((o) => inRange(o.createdAt, { from: todayKey(), to: todayKey() })), `ออเดอร์วันนี้ (${formatDateKey(todayKey())})`)} />}
           {tab === 'products' && <Products products={products} categories={categories} onAdd={() => setModal(null)} onEdit={setModal} onDelete={deleteProduct} />}
           {tab === 'orders' && <Orders products={products} categories={categories} cart={cart} cartItems={cartItems} cartTotal={cartTotal} setQty={setQty} customer={customer} setCustomer={setCustomer} customers={customers} clearCart={() => setCart({})} submit={submitOrder} />}
-          {tab === 'insights' && <Insights orders={orders} onOpenOrder={openOrder} />}
+          {tab === 'insights' && <Insights orders={orders} onOpenOrder={openOrder} onDelete={askDelete} onReport={downloadReport} />}
         </>}
       </main>
       {modal !== false && <ProductModal value={modal || undefined} categories={categories} onClose={() => setModal(false)} onSave={saveProduct} />}
-      {detail && <OrderDetailModal order={detail.order} justCreated={detail.justCreated} customerTotals={customerTotals(detail.order.customer)} onClose={() => setDetail(null)} onDelete={detail.justCreated ? undefined : deleteOrder} />}
+      {detail && <OrderDetailModal order={detail.order} justCreated={detail.justCreated} customerTotals={customerTotals(detail.order.customer)} onClose={() => setDetail(null)} onDelete={detail.justCreated ? undefined : (o) => askDelete([o], `ออเดอร์ ${o.id} (${o.customer})`)} />}
+      {deleteRequest && <DeleteOrdersModal request={deleteRequest} onCancel={() => setDeleteRequest(null)} onConfirm={(restock) => deleteOrders(deleteRequest.orders, restock)} />}
+      {sheetOpen && <SheetSettingsModal url={sheetUrl} defaultUrl={DEFAULT_SHEET_URL} sync={sync} syncText={syncText} lastSynced={lastSynced} onClose={() => setSheetOpen(false)} onSave={changeSheetUrl} onSync={() => syncNow()} />}
     </div>
   )
 }
@@ -319,8 +476,9 @@ function OrderRow({ o, onOpen }: { o: Order; onOpen: (o: Order) => void }) {
   )
 }
 
-function ShopMenu({ open, setOpen, sync, syncText, productCount, orderCount, onExport, onImport }: {
-  open: boolean; setOpen: (v: boolean) => void; sync: SyncState; syncText: string; productCount: number; orderCount: number; onExport: () => void; onImport: () => void
+function ShopMenu({ open, setOpen, sync, syncText, productCount, orderCount, onSync, onSheet, onReport, onBackup, onImport }: {
+  open: boolean; setOpen: (v: boolean) => void; sync: SyncState; syncText: string; productCount: number; orderCount: number
+  onSync: () => void; onSheet: () => void; onReport: () => void; onBackup: () => void; onImport: () => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -342,8 +500,11 @@ function ShopMenu({ open, setOpen, sync, syncText, productCount, orderCount, onE
             <div><b>แสงวัฒน์ ทุ่งลุง</b><small>สินค้า {productCount} รายการ · ออเดอร์ {orderCount} รายการ</small></div>
           </div>
           <span className={`connection ${sync}`}><i /> {syncText}</span>
-          <button role="menuitem" onClick={run(onExport)}><Download size={16} /> ส่งออกข้อมูล (สำรอง)</button>
-          <button role="menuitem" onClick={run(onImport)}><FileUp size={16} /> นำเข้าข้อมูล</button>
+          <button role="menuitem" onClick={run(onSync)}><RefreshCw size={16} /> ซิงก์กับ Google Sheet ตอนนี้</button>
+          <button role="menuitem" onClick={run(onSheet)}><Settings size={16} /> ตั้งค่า Google Sheet</button>
+          <button role="menuitem" onClick={run(onReport)}><FileSpreadsheet size={16} /> ดาวน์โหลดรายงาน Excel</button>
+          <button role="menuitem" onClick={run(onBackup)}><Download size={16} /> สำรองข้อมูล (ไฟล์ .json)</button>
+          <button role="menuitem" onClick={run(onImport)}><FileUp size={16} /> กู้คืนจากไฟล์สำรอง</button>
         </div>
       )}
     </div>
@@ -355,7 +516,7 @@ function ShopMenu({ open, setOpen, sync, syncText, productCount, orderCount, onE
 function Overview({ orders, products, sync, go, onAddProduct, onOpenOrder, clearToday }: {
   orders: Order[]; products: Product[]; sync: SyncState; go: (t: Tab) => void; onAddProduct: () => void; onOpenOrder: (o: Order) => void; clearToday: () => void
 }) {
-  const today = orders.filter((o) => inPeriod(o.createdAt, 'today'))
+  const today = orders.filter((o) => inRange(o.createdAt, { from: todayKey(), to: todayKey() }))
   const todayRevenue = today.reduce((s, o) => s + o.total, 0)
   const todayProfit = today.reduce((s, o) => s + o.profit, 0)
   const outOfStock = products.filter((p) => p.status === 'out_of_stock').length
@@ -364,7 +525,7 @@ function Overview({ orders, products, sync, go, onAddProduct, onOpenOrder, clear
       <div>
         <span className="hero-label">สรุปวันนี้</span>
         <h2>จัดการร้านให้ง่ายขึ้น<br /><em>เห็นทุกอย่างในที่เดียว</em></h2>
-        <p>{sync === 'online' ? 'เชื่อมต่อ Google Sheet แล้ว ข้อมูลสินค้าจะอัปเดตอัตโนมัติ' : sync === 'syncing' ? 'กำลังโหลดข้อมูลสินค้าจาก Google Sheet...' : 'ไม่สามารถเชื่อมต่อ Google Sheet ได้ กำลังใช้ข้อมูลที่บันทึกไว้'}</p>
+        <p>{sync === 'online' ? 'ซิงก์กับ Google Sheet แล้ว ออเดอร์และสต็อกจะบันทึกลงชีตอัตโนมัติ' : SYNC_TEXT[sync]}</p>
       </div>
       <div className="hero-art"><div className="rice">✦</div><span>STOCK<br /><b>READY</b></span></div>
     </section>
@@ -520,32 +681,89 @@ function Orders({ products, categories, cart, cartItems, cartTotal, setQty, cust
 
 // ---------------------------------------------------------------- insights
 
-function Insights({ orders, onOpenOrder }: { orders: Order[]; onOpenOrder: (o: Order) => void }) {
-  const [period, setPeriod] = useState<Period>('all')
+type Preset = 'today' | 'yesterday' | 'week' | 'month' | 'all'
+const PRESET_LABEL: Record<Preset, string> = { today: 'วันนี้', yesterday: 'เมื่อวาน', week: '7 วันล่าสุด', month: 'เดือนนี้', all: 'ทั้งหมด' }
+function presetRange(p: Preset): DateRange {
+  const t = todayKey()
+  if (p === 'today') return { from: t, to: t }
+  if (p === 'yesterday') return { from: shiftDays(t, -1), to: shiftDays(t, -1) }
+  if (p === 'week') return { from: shiftDays(t, -6), to: t }
+  if (p === 'month') return { from: `${t.slice(0, 8)}01`, to: t }
+  return { from: '', to: '' }
+}
+function rangeLabel(r: DateRange) {
+  if (!r.from && !r.to) return 'ทุกวัน'
+  if (r.from && r.from === r.to) return formatDateKey(r.from, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  return `${r.from ? formatDateKey(r.from) : 'เริ่มต้น'} – ${r.to ? formatDateKey(r.to) : 'ล่าสุด'}`
+}
+
+function Insights({ orders, onOpenOrder, onDelete, onReport }: {
+  orders: Order[]; onOpenOrder: (o: Order) => void; onDelete: (list: Order[], title: string) => void; onReport: (list: Order[], label: string) => void
+}) {
+  const [range, setRange] = useState<DateRange>(() => presetRange('today'))
   const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null)
-  const list = useMemo(() => orders.filter((o) => inPeriod(o.createdAt, period)), [orders, period])
+  const list = useMemo(() => orders.filter((o) => inRange(o.createdAt, range)), [orders, range])
   const revenue = list.reduce((s, o) => s + o.total, 0)
   const cost = list.reduce((s, o) => s + o.cost, 0)
   const profit = revenue - cost
+  const days = useMemo(() => dailySummary(list), [list])
   const byCustomer = useMemo(() => summarize(list, (o) => o.customer), [list])
   const maxCustomer = Math.max(1, ...byCustomer.map((c) => c.revenue))
+  const maxDay = Math.max(1, ...days.map((d) => d.revenue))
   const history = selectedCustomer ? list.filter((o) => o.customer === selectedCustomer) : list
-  const periodLabel: Record<Period, string> = { all: 'ทุกช่วงเวลา', today: 'วันนี้', week: '7 วันล่าสุด', month: 'เดือนนี้' }
+  const singleDay = !!range.from && range.from === range.to
+  const activePreset = (Object.keys(PRESET_LABEL) as Preset[]).find((p) => { const r = presetRange(p); return r.from === range.from && r.to === range.to })
+  const label = rangeLabel(range)
+  const setDay = (key: string) => { setRange({ from: key, to: key }); setSelectedCustomer(null) }
+  const fileLabel = !range.from && !range.to ? `all-${todayKey()}` : singleDay ? range.from : `${range.from || 'start'}_to_${range.to || todayKey()}`
 
   return <>
-    <div className="toolbar">
-      <p className="muted">แสดงข้อมูล: {periodLabel[period]} · {list.length} ออเดอร์</p>
-      <select className="period-select" value={period} onChange={(e) => { setPeriod(e.target.value as Period); setSelectedCustomer(null) }}>
-        {(Object.keys(periodLabel) as Period[]).map((p) => <option key={p} value={p}>{periodLabel[p]}</option>)}
-      </select>
+    <div className="panel date-panel">
+      <div className="date-presets">
+        <CalendarDays size={16} />
+        {(Object.keys(PRESET_LABEL) as Preset[]).map((p) => (
+          <button key={p} className={activePreset === p ? 'active' : ''} onClick={() => { setRange(presetRange(p)); setSelectedCustomer(null) }}>{PRESET_LABEL[p]}</button>
+        ))}
+      </div>
+      <div className="date-inputs">
+        {singleDay && <button className="icon-btn" aria-label="วันก่อนหน้า" onClick={() => setDay(shiftDays(range.from, -1))}><ChevronLeft size={16} /></button>}
+        <label>ตั้งแต่<input type="date" value={range.from} max={range.to || undefined} onChange={(e) => setRange((r) => ({ from: e.target.value, to: r.to && e.target.value > r.to ? e.target.value : r.to }))} /></label>
+        <label>ถึง<input type="date" value={range.to} min={range.from || undefined} onChange={(e) => setRange((r) => ({ from: r.from && e.target.value < r.from ? e.target.value : r.from, to: e.target.value }))} /></label>
+        {singleDay && <button className="icon-btn" aria-label="วันถัดไป" onClick={() => setDay(shiftDays(range.from, 1))} disabled={range.from >= todayKey()}><ChevronRight size={16} /></button>}
+      </div>
+      <div className="date-summary">
+        <b>{label}</b>
+        <div className="date-actions">
+          <button className="secondary" onClick={() => onReport(list, fileLabel)} disabled={!list.length}><FileSpreadsheet size={15} /> ดาวน์โหลด Excel</button>
+          <button className="secondary danger" onClick={() => onDelete(list, `ออเดอร์ช่วง ${label}`)} disabled={!list.length}><Trash2 size={15} /> ลบออเดอร์ในช่วงนี้ ({list.length})</button>
+        </div>
+      </div>
     </div>
+
     <div className="stats">
-      <Stat label="ยอดขายรวม" value={`฿${money(revenue)}`} sub={periodLabel[period]} accent="#d6a84a" />
+      <Stat label="ยอดขายรวม" value={`฿${money(revenue)}`} sub={label} accent="#d6a84a" />
       <Stat label="ต้นทุนรวม" value={`฿${money(cost)}`} sub="จากรายการขาย" accent="#e8c875" />
       <Stat label="กำไรสุทธิ" value={`฿${money(profit)}`} sub={`อัตรากำไร ${money(revenue ? (profit / revenue) * 100 : 0)}%`} accent="#55aa73" />
       <Stat label="จำนวนออเดอร์" value={String(list.length)} sub={`เฉลี่ย ฿${money(list.length ? revenue / list.length : 0)} / ออเดอร์`} accent="#8a9aa8" />
     </div>
-    <div className="insights-single">
+
+    <div className="insights-grid">
+      <div className="panel insights-panel">
+        <div className="panel-title"><div><span className="section-kicker">DAILY SUMMARY</span><h3>สรุปรายวัน</h3></div></div>
+        {days.length > 0 && <div className="insight-head day"><span>วันที่</span><span>ออเดอร์</span><span>ยอดขาย</span><span>กำไร</span><span /></div>}
+        {days.map((d) => (
+          <div className={`insight-row day ${singleDay && range.from === d.key ? 'selected' : ''}`} key={d.key}>
+            <button className="day-link" onClick={() => setDay(d.key)} title="ดูออเดอร์ของวันนี้">
+              <b>{formatDateKey(d.key)}</b><span className="bar"><i style={{ width: `${(d.revenue / maxDay) * 100}%` }} /></span>
+            </button>
+            <span className="insight-num">{d.orders}</span>
+            <strong className="insight-num">฿{money(d.revenue)}</strong>
+            <strong className={`insight-num ${d.profit >= 0 ? 'positive' : 'negative'}`}>฿{money(d.profit)}</strong>
+            <button className="icon-btn danger" aria-label={`ลบออเดอร์วันที่ ${d.key}`} title="ลบออเดอร์ของวันนี้" onClick={() => onDelete(list.filter((o) => inRange(o.createdAt, { from: d.key, to: d.key })), `ออเดอร์วันที่ ${formatDateKey(d.key)}`)}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        {!list.length && <p className="empty">ไม่มีออเดอร์ในช่วงวันที่นี้</p>}
+      </div>
       <div className="panel insights-panel">
         <div className="panel-title"><div><span className="section-kicker">CUSTOMER SUMMARY</span><h3>สรุปตามลูกค้า</h3></div></div>
         {byCustomer.length > 0 && <div className="insight-head"><span>ลูกค้า</span><span>ออเดอร์</span><span>ยอดขาย</span><span>กำไร</span></div>}
@@ -558,19 +776,95 @@ function Insights({ orders, onOpenOrder }: { orders: Order[]; onOpenOrder: (o: O
             <strong className={`insight-num ${c.profit >= 0 ? 'positive' : 'negative'}`}>฿{money(c.profit)}</strong>
           </button>
         ))}
-        {!list.length && <p className="empty">ข้อมูลสรุปจะแสดงเมื่อมีออเดอร์</p>}
+        {!list.length && <p className="empty">ไม่มีออเดอร์ในช่วงวันที่นี้</p>}
       </div>
     </div>
     <div className="panel insights-panel history">
       <div className="panel-title">
-        <div><span className="section-kicker">ORDER HISTORY</span><h3>{selectedCustomer ? `ออเดอร์ของ ${selectedCustomer}` : 'ประวัติออเดอร์'}</h3></div>
-        {selectedCustomer && <button className="text-link" onClick={() => setSelectedCustomer(null)}><X size={12} /> แสดงทั้งหมด</button>}
+        <div><span className="section-kicker">ORDER HISTORY</span><h3>{selectedCustomer ? `ออเดอร์ของ ${selectedCustomer}` : 'รายการออเดอร์'} · {label}</h3></div>
+        {selectedCustomer && <button className="text-link" onClick={() => setSelectedCustomer(null)}><X size={12} /> แสดงทุกลูกค้า</button>}
       </div>
-      <p className="muted">คลิกที่ออเดอร์เพื่อดูรายละเอียดและดาวน์โหลดบิล PDF</p>
+      <p className="muted">คลิกที่ออเดอร์เพื่อดูรายละเอียด ดาวน์โหลดบิล PDF หรือลบออเดอร์</p>
       {history.map((o) => <OrderRow key={o.id} o={o} onOpen={onOpenOrder} />)}
-      {!history.length && <p className="empty">ไม่มีออเดอร์ในช่วงเวลานี้</p>}
+      {!history.length && <p className="empty">ไม่มีออเดอร์ในช่วงวันที่นี้</p>}
     </div>
   </>
+}
+
+// ---------------------------------------------------------------- dialogs
+
+function DeleteOrdersModal({ request, onCancel, onConfirm }: { request: DeleteRequest; onCancel: () => void; onConfirm: (restock: boolean) => void }) {
+  const [restock, setRestock] = useState(false)
+  const total = request.orders.reduce((s, o) => s + o.total, 0)
+  const items = request.orders.reduce((s, o) => s + o.items.length, 0)
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+      <div className="modal modal-small" role="alertdialog" aria-modal="true">
+        <div className="modal-head">
+          <div><span className="section-kicker">DELETE ORDERS</span><h2>ลบออเดอร์</h2></div>
+          <button onClick={onCancel} aria-label="ปิด"><X /></button>
+        </div>
+        <p className="delete-summary">{request.title}<br /><b>{request.orders.length} ออเดอร์</b> · {items} รายการสินค้า · ยอดขาย <b>฿{money(total)}</b></p>
+        <label className="check">
+          <input type="checkbox" checked={restock} onChange={(e) => setRestock(e.target.checked)} />
+          <span><b>คืนสินค้ากลับเข้าสต็อก</b><small>เลือกเมื่อออเดอร์ถูกยกเลิก / ลูกค้าไม่ได้รับของจริง ถ้าแค่ล้างข้อมูลเก่าที่ขายไปแล้ว ไม่ต้องเลือก</small></span>
+        </label>
+        <p className="muted">ยอดขายและกำไรของออเดอร์เหล่านี้จะถูกลบออกจากรายงานด้วย และย้อนกลับไม่ได้ (แนะนำให้ดาวน์โหลด Excel เก็บไว้ก่อน)</p>
+        <div className="modal-actions">
+          <button className="secondary" onClick={onCancel}>ยกเลิก</button>
+          <button className="primary danger-fill" onClick={() => onConfirm(restock)}><Trash2 size={16} /> ลบ {request.orders.length} ออเดอร์</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SheetSettingsModal({ url, defaultUrl, sync, syncText, lastSynced, onClose, onSave, onSync }: {
+  url: string; defaultUrl: string; sync: SyncState; syncText: string; lastSynced: Date | null; onClose: () => void; onSave: (url: string) => Promise<void>; onSync: () => void
+}) {
+  const [value, setValue] = useState(url)
+  const [busy, setBusy] = useState(false)
+  const valid = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec\/?$/.test(value.trim())
+  const save = async () => {
+    if (!valid) return alert('URL ต้องเป็นลิงก์ Web app ของ Apps Script เช่น https://script.google.com/macros/s/xxxx/exec')
+    setBusy(true)
+    try { await onSave(value) } finally { setBusy(false) }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <div><span className="section-kicker">GOOGLE SHEET</span><h2>เชื่อมต่อ Google Sheet</h2></div>
+          <button onClick={onClose} aria-label="ปิด"><X /></button>
+        </div>
+        <div className={`sheet-status ${sync}`}>
+          <span className={`connection ${sync}`}><i /> {syncText}</span>
+          {lastSynced && <small>ซิงก์ล่าสุด {lastSynced.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</small>}
+        </div>
+        {sync === 'readonly' && (
+          <p className="notice">สคริปต์ที่เชื่อมอยู่ตอนนี้ส่งรายการสินค้าให้แอปได้อย่างเดียว ออเดอร์ สต็อก และยอดขายจึงยังไม่ถูกบันทึกลงชีต
+            ติดตั้งสคริปต์ใหม่ตามคู่มือด้านล่าง แล้วนำ URL ใหม่มาวางที่นี่</p>
+        )}
+        <div className="form-grid">
+          <label className="wide">URL ของ Apps Script (Web app)<input value={value} onChange={(e) => setValue(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec" /></label>
+        </div>
+        <ol className="sheet-steps">
+          <li>เปิด Google Sheet ของร้าน → เมนู <b>ส่วนขยาย → Apps Script</b></li>
+          <li>ลบโค้ดเดิม แล้ววางโค้ดจากไฟล์ <code>google-apps-script/Code.gs</code> → กดบันทึก → เลือกฟังก์ชัน <b>setup</b> แล้วกด <b>เรียกใช้</b> (กดอนุญาตสิทธิ์)</li>
+          <li><b>การทำให้ใช้งานได้ → การทำให้ใช้งานได้รายการใหม่ → เว็บแอป</b> · เรียกใช้ในฐานะ: <b>ฉัน</b> · ผู้มีสิทธิ์เข้าถึง: <b>ทุกคน</b></li>
+          <li>คัดลอก URL ที่ลงท้ายด้วย <code>/exec</code> มาวางด้านบน แล้วกดบันทึก</li>
+        </ol>
+        <a className="text-link" href={SETUP_GUIDE_URL} target="_blank" rel="noreferrer">เปิดคู่มือและโค้ดสคริปต์ฉบับเต็ม →</a>
+        <p className="muted sheet-note">เมื่อเชื่อมสำเร็จครั้งแรก ข้อมูลสินค้าและออเดอร์ที่บันทึกไว้ในเครื่องนี้จะถูกส่งขึ้นชีตให้อัตโนมัติ
+          หลังจากนั้นทุกออเดอร์จะตัดสต็อกในชีต และอัปเดตชีต "สรุปรายวัน" กับ "สรุปตามลูกค้า" ให้ทันที</p>
+        <div className="modal-actions">
+          {value.trim() !== defaultUrl && <button className="secondary" onClick={() => setValue(defaultUrl)}>ใช้ URL เดิม</button>}
+          <button className="secondary" onClick={onSync} disabled={busy}><RefreshCw size={15} /> ซิงก์ตอนนี้</button>
+          <button className="primary" onClick={save} disabled={busy || value.trim() === url}><Cloud size={16} /> {busy ? 'กำลังเชื่อมต่อ...' : 'บันทึกและเชื่อมต่อ'}</button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------- product modal
