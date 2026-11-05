@@ -14,7 +14,10 @@ import {
 import { fetchSheet, postSheet, type SheetAction, type SheetData, type SheetMode, withDate } from '@/lib/sync'
 import { OrderDetailModal } from '@/components/order-detail'
 
-const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbwzkCcKnFFNy14eRcWJbv2aXXmiol8dK1eJg5r0pMdaKAhYbpgq6ugFoGcLX3K3qKJq/exec'
+// the shop's shared Google Sheet – every device connects here automatically
+const DEFAULT_SHEET_URL = 'https://script.google.com/macros/s/AKfycbxF0l9Njl_DsAZOwyfvh80cRFBron_v-SvsMrkpA1ERQrSQ6RXA68ljqAUFanGcW88WDg/exec'
+// earlier sheet URLs: devices still pointing at these are moved to the default automatically
+const RETIRED_SHEET_URLS = ['https://script.google.com/macros/s/AKfycbwzkCcKnFFNy14eRcWJbv2aXXmiol8dK1eJg5r0pMdaKAhYbpgq6ugFoGcLX3K3qKJq/exec']
 const SETUP_GUIDE_URL = 'https://github.com/Flukeapklps/Sangwat_Thunglung/blob/main/google-apps-script/README.md'
 const LOGO_URL = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/sangwat%20logo-QtbMkseg5dRbmauJvFdCVl767RO672.png'
 const HIDDEN_STARTER_NAMES = new Set(['ข้าวหอมมะลิ 5 กก.', 'ข้าวขาวเสาไห้ 5 กก.', 'ข้าวเหนียวเขี้ยวงู 5 กก.', 'ข้าวกล้องหอมมะลิ 1 กก.', 'ข้าวไรซ์เบอร์รี่ 1 กก.'])
@@ -159,13 +162,14 @@ export default function PosApp() {
       if (readStorage<string>(KEYS.linked, '') !== url) {
         const remoteOrderIds = new Set(data.orders.map((o: any) => String(o.id)))
         const localOrders = readStorage<any[]>(KEYS.orders, []).map(normalizeOrder).filter((o) => !remoteOrderIds.has(o.id))
+        // only add products the sheet does not have yet – never overwrite or delete shared data from one device
         const remoteProductIds = new Set(data.products.map((p: any) => String(p.id)))
+        const remoteNames = new Set(data.products.map((p: any) => String(p.name ?? '').trim()))
         const localProducts = readStorage<any[]>(KEYS.products, []).map(normalizeProduct)
-          .filter((p) => isVisible(p) && (p.updatedAt || !remoteProductIds.has(p.id)) && !deletedRef.current.includes(p.id))
+          .filter((p) => isVisible(p) && !remoteProductIds.has(p.id) && !remoteNames.has(p.name) && !deletedRef.current.includes(p.id))
         const first: SheetAction[] = [
           ...localProducts.map((p) => ({ type: 'saveProduct' as const, product: p })),
           ...(localOrders.length ? [{ type: 'upsertOrders' as const, orders: localOrders.map(withDate), deductStock: false }] : []),
-          ...deletedRef.current.map((id) => ({ type: 'deleteProduct' as const, id })),
         ]
         outbox.current = [...first, ...outbox.current]
         saveOutbox()
@@ -201,7 +205,9 @@ export default function PosApp() {
     deletedRef.current = Array.isArray(deletedIds) ? deletedIds : []
     const storedOrders = readStorage<any[]>(KEYS.orders, [])
     setOrders((Array.isArray(storedOrders) ? storedOrders : []).map(normalizeOrder))
-    const url = readStorage<string>(KEYS.sheetUrl, DEFAULT_SHEET_URL) || DEFAULT_SHEET_URL
+    const storedUrl = readStorage<string>(KEYS.sheetUrl, "")
+    const url = storedUrl && !RETIRED_SHEET_URLS.includes(storedUrl) ? storedUrl : DEFAULT_SHEET_URL
+    if (storedUrl && url !== storedUrl) { try { localStorage.removeItem(KEYS.sheetUrl) } catch {} }
     urlRef.current = url
     setSheetUrl(url)
     const box = readStorage<SheetAction[]>(KEYS.outbox, [])
@@ -223,7 +229,7 @@ export default function PosApp() {
     const clean = url.trim() || DEFAULT_SHEET_URL
     urlRef.current = clean
     setSheetUrl(clean)
-    writeStorage(KEYS.sheetUrl, clean)
+    if (clean === DEFAULT_SHEET_URL) { try { localStorage.removeItem(KEYS.sheetUrl) } catch {} } else writeStorage(KEYS.sheetUrl, clean)
     mode.current = null
     await syncNow()
   }
