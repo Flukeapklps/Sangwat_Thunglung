@@ -15,23 +15,24 @@ var ORDER_SHEET = 'ออเดอร์';
 var DAILY_SHEET = 'สรุปรายวัน';
 var CUSTOMER_SHEET = 'สรุปตามลูกค้า';
 
-// คอลัมน์ในชีตสินค้า (ชื่อหัวคอลัมน์ที่รองรับ – ตัวแรกคือชื่อที่จะใช้ถ้าต้องสร้างคอลัมน์ใหม่)
+// คอลัมน์ในชีตสินค้า (ชื่อหัวคอลัมน์ที่รองรับ – ตัวแรกคือชื่อที่ใช้ตอนสร้างคอลัมน์ใหม่)
+// ลำดับในรายการนี้ = ลำดับคอลัมน์ตอนสร้างชีตใหม่
 var PRODUCT_FIELDS = {
   id: ['id', 'ID', 'รหัส'],
-  name: ['name', 'productName', 'ชื่อสินค้า'],
-  brand: ['brand', 'แบรนด์'],
-  category: ['category', 'type', 'หมวดหมู่'],
-  img: ['img', 'imageUrl', 'รูป', 'รูปภาพ'],
-  cost: ['cost', 'baseCost', 'ราคาทุน'],
-  labor: ['labor', 'laborCost', 'ค่าคนงาน'],
-  freight: ['freight', 'transportCost', 'ค่าบรรทุก'],
-  unitCost: ['unitCost', 'totalCost', 'ต้นทุนรวม'],
-  kgPerBag: ['kgPerBag', 'bagSize', 'weight', 'กก.ต่อถุง'],
-  bagPrice: ['bagPrice', 'retailPrice', 'ราคาขายต่อถุง'],
-  kgPrice: ['kgPrice', 'pricePerKg', 'ราคาขายต่อกก.'],
-  bagStock: ['bagStock', 'stockBags', 'stock', 'สต็อกถุง'],
-  kgStock: ['kgStock', 'stockKg', 'สต็อกกก.'],
-  status: ['status', 'สถานะ'],
+  name: ['ชื่อสินค้า', 'name', 'productName'],
+  brand: ['แบรนด์', 'brand', 'ตรา'],
+  category: ['หมวดหมู่', 'category', 'type'],
+  bagPrice: ['ราคาขายต่อถุง', 'bagPrice', 'retailPrice'],
+  kgPrice: ['ราคาขายต่อกก.', 'kgPrice', 'pricePerKg'],
+  bagStock: ['สต็อกถุง', 'bagStock', 'stockBags', 'stock'],
+  kgStock: ['สต็อกกก.', 'kgStock', 'stockKg'],
+  status: ['สถานะ', 'status'],
+  cost: ['ราคาทุน', 'cost', 'baseCost'],
+  labor: ['ค่าคนงาน', 'labor', 'laborCost'],
+  freight: ['ค่าบรรทุก', 'freight', 'transportCost'],
+  unitCost: ['ต้นทุนรวม', 'unitCost', 'totalCost'],
+  kgPerBag: ['กก.ต่อถุง', 'kgPerBag', 'bagSize', 'weight'],
+  img: ['รูปภาพ', 'img', 'imageUrl', 'รูป'],
 };
 var NUMBER_FIELDS = ['cost', 'labor', 'freight', 'unitCost', 'kgPerBag', 'bagPrice', 'kgPrice', 'bagStock', 'kgStock'];
 
@@ -66,11 +67,20 @@ function doPost(e) {
   }
 }
 
-/** รันฟังก์ชันนี้ครั้งแรกจากหน้าแก้ไขสคริปต์ เพื่อกดอนุญาตสิทธิ์ และสร้างชีตที่ต้องใช้ */
+/**
+ * รันฟังก์ชันนี้ครั้งแรกจากหน้าแก้ไขสคริปต์ (เลือก setup แล้วกด ▶ เรียกใช้)
+ * จะสร้างชีตทั้งหมดพร้อมหัวตารางให้อัตโนมัติ: สินค้า, ออเดอร์, สรุปรายวัน, สรุปตามลูกค้า
+ * รันซ้ำได้ ไม่ลบข้อมูลเดิม
+ */
 function setup() {
-  productSheet_();
+  var products = productSheet_();
+  productColumns_(products, true);
+  products.getRange(1, 1, 1, products.getLastColumn()).setFontWeight('bold').setBackground('#edf4ec');
+  products.setFrozenRows(1);
+  products.setColumnWidth(2, 200);
   orderSheet_();
   rebuildSummaries_();
+  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(products);
 }
 
 // ------------------------------------------------------------------ products
@@ -82,10 +92,13 @@ function productSheet_() {
     if (s) return s;
   }
   var first = ss.getSheets()[0];
-  if (first.getName() === ORDER_SHEET || first.getName() === DAILY_SHEET || first.getName() === CUSTOMER_SHEET) {
-    return ss.insertSheet(PRODUCT_SHEET_NAMES[0], 0);
+  var reserved = [ORDER_SHEET, DAILY_SHEET, CUSTOMER_SHEET].indexOf(first.getName()) >= 0;
+  if (!reserved && first.getLastRow() === 0) {
+    first.setName(PRODUCT_SHEET_NAMES[0]); // ไฟล์ใหม่ที่ยังว่าง: ใช้ชีตแรกเป็นชีตสินค้า
+    return first;
   }
-  return first;
+  if (reserved) return ss.insertSheet(PRODUCT_SHEET_NAMES[0], 0);
+  return first; // ชีตแรกมีข้อมูลสินค้าอยู่แล้ว
 }
 
 /** หาเลขคอลัมน์ (เริ่ม 0) ของแต่ละฟิลด์ ถ้ายังไม่มีคอลัมน์และ create=true จะเพิ่มคอลัมน์ใหม่ท้ายตาราง */
