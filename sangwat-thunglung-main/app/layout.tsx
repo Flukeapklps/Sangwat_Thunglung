@@ -5,8 +5,8 @@ import './globals.css'
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || ''
 
 export const metadata: Metadata = {
-  title: 'สังวาลย์ POS | จัดการร้านค้า',
-  description: 'ระบบจัดการสินค้า สต็อก ออเดอร์ และสรุปยอดขายสำหรับร้านสังวาลย์',
+  title: 'แสงวัฒน์ POS | จัดการร้านค้า',
+  description: 'ระบบจัดการสินค้า สต็อก ออเดอร์ และสรุปยอดขายสำหรับร้านแสงวัฒน์ ทุ่งลุง',
   generator: 'v0.app',
   icons: {
     icon: [
