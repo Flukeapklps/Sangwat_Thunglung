@@ -39,7 +39,6 @@ export type OrderItem = {
 export type Order = {
   id: string
   customer: string
-  seller: string
   createdAt: string
   items: OrderItem[]
   total: number
@@ -50,7 +49,6 @@ export type Order = {
 export type Cart = Record<string, { bag: number; kg: number }>
 
 export const DEFAULT_CATEGORY = 'ทั่วไป'
-export const DEFAULT_SELLER = 'ไม่ระบุ'
 
 export const unitLabel = (u: Unit) => (u === 'bag' ? 'ถุง' : 'กก.')
 
@@ -125,7 +123,6 @@ export function normalizeOrder(raw: any): Order {
   return {
     id: String(raw.id ?? `POS-${Date.now()}`),
     customer: String(raw.customer ?? '').trim() || 'ลูกค้าทั่วไป',
-    seller: String(raw.seller ?? '').trim() || DEFAULT_SELLER,
     createdAt: String(raw.createdAt ?? new Date().toISOString()),
     items,
     total: round2(total),

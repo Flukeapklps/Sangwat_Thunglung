@@ -44,7 +44,6 @@ export function Receipt({ order }: { order: Order }) {
       </div>
       <div className="receipt-parties">
         <span>ลูกค้า: <b>{order.customer}</b></span>
-        <span>พนักงานขาย: <b>{order.seller}</b></span>
       </div>
       <table className="receipt-table">
         <thead>

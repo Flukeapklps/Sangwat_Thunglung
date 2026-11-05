@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3, ChevronRight, CirclePlus, Download, Edit3, FileUp, ImageOff, LayoutDashboard, Minus, Package,
-  PackagePlus, Plus, Search, ShoppingCart, Trash2, Upload, UserRound, X,
+  PackagePlus, Plus, Search, ShoppingCart, Store, Trash2, Upload, X,
 } from 'lucide-react'
 import {
   type Cart, categoryOf, compressImage, DEFAULT_CATEGORY, formatDateTime, inPeriod, kgCost, mergeRemote, money,
@@ -22,7 +22,6 @@ const KEYS = {
   overrides: 'sangwat-product-overrides', // legacy – migrated into products on load
   deleted: 'sangwat-deleted-products',
   orders: 'sangwat-orders',
-  seller: 'sangwat-current-seller',
 }
 
 type Tab = 'overview' | 'products' | 'orders' | 'insights'
@@ -40,7 +39,7 @@ export default function PosApp() {
   const [deleted, setDeleted] = useState<string[]>([])
   const [cart, setCart] = useState<Cart>({})
   const [customer, setCustomer] = useState('')
-  const [seller, setSeller] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
   const [modal, setModal] = useState<Product | null | false>(false)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [sync, setSync] = useState<SyncState>('syncing')
@@ -63,7 +62,6 @@ export default function PosApp() {
     setDeleted(Array.isArray(deletedIds) ? deletedIds : [])
     const storedOrders = readStorage<any[]>(KEYS.orders, [])
     setOrders((Array.isArray(storedOrders) ? storedOrders : []).map(normalizeOrder))
-    setSeller(readStorage<string>(KEYS.seller, ''))
     setHydrated(true)
 
     let cancelled = false
@@ -89,10 +87,8 @@ export default function PosApp() {
   useEffect(() => { if (hydrated) { persist(KEYS.products, products); try { localStorage.removeItem(KEYS.overrides) } catch {} } }, [products, hydrated, persist])
   useEffect(() => { if (hydrated) persist(KEYS.orders, orders) }, [orders, hydrated, persist])
   useEffect(() => { if (hydrated) persist(KEYS.deleted, deleted) }, [deleted, hydrated, persist])
-  useEffect(() => { if (hydrated) persist(KEYS.seller, seller) }, [seller, hydrated, persist])
 
   const categories = useMemo(() => uniqueCategories(products), [products])
-  const sellers = useMemo(() => [...new Set(orders.map((o) => o.seller))].filter(Boolean), [orders])
   const customers = useMemo(() => [...new Set(orders.map((o) => o.customer))].filter(Boolean), [orders])
   const productById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products])
 
@@ -127,9 +123,7 @@ export default function PosApp() {
 
   const submitOrder = () => {
     const name = customer.trim()
-    const by = seller.trim()
     if (!name) return alert('กรุณาระบุชื่อลูกค้า')
-    if (!by) return alert('กรุณาระบุชื่อพนักงานขาย')
     if (!cartItems.length) return alert('กรุณาเลือกสินค้าอย่างน้อย 1 รายการ')
     const shortage = cartItems.find((i) => {
       const p = productById.get(i.id)
@@ -139,7 +133,7 @@ export default function PosApp() {
 
     const total = round2(cartItems.reduce((s, i) => s + i.price * i.qty, 0))
     const cost = round2(cartItems.reduce((s, i) => s + i.cost * i.qty, 0))
-    const order: Order = { id: `POS-${Date.now()}`, customer: name, seller: by, createdAt: new Date().toISOString(), items: cartItems, total, cost, profit: round2(total - cost) }
+    const order: Order = { id: `POS-${Date.now()}`, customer: name, createdAt: new Date().toISOString(), items: cartItems, total, cost, profit: round2(total - cost) }
 
     const nextOrders = [order, ...orders]
     setOrders(nextOrders)
@@ -251,15 +245,23 @@ export default function PosApp() {
             <h1>{titles[tab]}</h1>
           </div>
           <div className="header-actions">
-            {seller && <span className="seller-chip"><UserRound size={13} /> {seller}</span>}
-            <button className="avatar" title={seller || 'พนักงานขาย'} onClick={() => setTab('orders')}>{(seller || 'ส')[0]}</button>
+            <ShopMenu
+              open={menuOpen}
+              setOpen={setMenuOpen}
+              sync={sync}
+              syncText={syncText}
+              productCount={products.length}
+              orderCount={orders.length}
+              onExport={exportData}
+              onImport={() => fileRef.current?.click()}
+            />
           </div>
         </header>
 
         {!hydrated ? <p className="empty">กำลังโหลดข้อมูล...</p> : <>
           {tab === 'overview' && <Overview orders={orders} products={products} sync={sync} go={setTab} onAddProduct={() => { setTab('products'); setModal(null) }} onOpenOrder={openOrder} clearToday={clearToday} />}
           {tab === 'products' && <Products products={products} categories={categories} onAdd={() => setModal(null)} onEdit={setModal} onDelete={deleteProduct} />}
-          {tab === 'orders' && <Orders products={products} categories={categories} cart={cart} cartItems={cartItems} cartTotal={cartTotal} setQty={setQty} customer={customer} setCustomer={setCustomer} seller={seller} setSeller={setSeller} sellers={sellers} customers={customers} clearCart={() => setCart({})} submit={submitOrder} />}
+          {tab === 'orders' && <Orders products={products} categories={categories} cart={cart} cartItems={cartItems} cartTotal={cartTotal} setQty={setQty} customer={customer} setCustomer={setCustomer} customers={customers} clearCart={() => setCart({})} submit={submitOrder} />}
           {tab === 'insights' && <Insights orders={orders} onOpenOrder={openOrder} />}
         </>}
       </main>
@@ -310,10 +312,41 @@ function OrderRow({ o, onOpen }: { o: Order; onOpen: (o: Order) => void }) {
   return (
     <button className="feed-item clickable" onClick={() => onOpen(o)}>
       <span className="feed-avatar">{o.customer[0]}</span>
-      <span><b>{o.customer}</b><small>{o.items.length} รายการ · {o.seller} · {formatDateTime(o.createdAt)}</small></span>
+      <span><b>{o.customer}</b><small>{o.items.length} รายการ · {formatDateTime(o.createdAt)}</small></span>
       <span className="feed-amount"><strong>฿{money(o.total)}</strong><small className={o.profit >= 0 ? 'positive' : 'negative'}>กำไร ฿{money(o.profit)}</small></span>
       <ChevronRight size={16} />
     </button>
+  )
+}
+
+function ShopMenu({ open, setOpen, sync, syncText, productCount, orderCount, onExport, onImport }: {
+  open: boolean; setOpen: (v: boolean) => void; sync: SyncState; syncText: string; productCount: number; orderCount: number; onExport: () => void; onImport: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [open, setOpen])
+  const run = (fn: () => void) => () => { setOpen(false); fn() }
+  return (
+    <div className="shop-menu" ref={ref}>
+      <button className="avatar" aria-haspopup="menu" aria-expanded={open} title="ข้อมูลร้าน" onClick={() => setOpen(!open)}>ส</button>
+      {open && (
+        <div className="shop-menu-pop" role="menu">
+          <div className="shop-menu-head">
+            <Store size={18} />
+            <div><b>แสงวัฒน์ ทุ่งลุง</b><small>สินค้า {productCount} รายการ · ออเดอร์ {orderCount} รายการ</small></div>
+          </div>
+          <span className={`connection ${sync}`}><i /> {syncText}</span>
+          <button role="menuitem" onClick={run(onExport)}><Download size={16} /> ส่งออกข้อมูล (สำรอง)</button>
+          <button role="menuitem" onClick={run(onImport)}><FileUp size={16} /> นำเข้าข้อมูล</button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -431,20 +464,18 @@ function QtyControl({ value, max, onChange, disabled }: { value: number; max: nu
   )
 }
 
-function Orders({ products, categories, cart, cartItems, cartTotal, setQty, customer, setCustomer, seller, setSeller, sellers, customers, clearCart, submit }: {
+function Orders({ products, categories, cart, cartItems, cartTotal, setQty, customer, setCustomer, customers, clearCart, submit }: {
   products: Product[]; categories: string[]; cart: Cart; cartItems: OrderItem[]; cartTotal: number; setQty: (p: Product, u: Unit, v: number) => void
-  customer: string; setCustomer: (v: string) => void; seller: string; setSeller: (v: string) => void; sellers: string[]; customers: string[]; clearCart: () => void; submit: () => void
+  customer: string; setCustomer: (v: string) => void; customers: string[]; clearCart: () => void; submit: () => void
 }) {
   const f = useCategoryFilter(products, categories)
   const cartCost = cartItems.reduce((s, i) => s + i.cost * i.qty, 0)
   return (
     <div className="order-layout">
       <section>
-        <div className="customer-field two">
+        <div className="customer-field">
           <label>ชื่อลูกค้า<input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="เช่น นาย A" list="customer-list" /></label>
-          <label>พนักงานขาย<input value={seller} onChange={(e) => setSeller(e.target.value)} placeholder="ชื่อผู้ขาย" list="seller-list" /></label>
           <datalist id="customer-list">{customers.map((c) => <option key={c} value={c} />)}</datalist>
-          <datalist id="seller-list">{sellers.map((s) => <option key={s} value={s} />)}</datalist>
         </div>
         <label className="search wide"><Search size={15} /><input value={f.query} onChange={(e) => f.setQuery(e.target.value)} placeholder="ค้นหาสินค้า" /></label>
         <CategoryTabs categories={categories} value={f.category} onChange={f.setCategory} counts={f.counts} />
@@ -497,9 +528,7 @@ function Insights({ orders, onOpenOrder }: { orders: Order[]; onOpenOrder: (o: O
   const cost = list.reduce((s, o) => s + o.cost, 0)
   const profit = revenue - cost
   const byCustomer = useMemo(() => summarize(list, (o) => o.customer), [list])
-  const bySeller = useMemo(() => summarize(list, (o) => o.seller), [list])
   const maxCustomer = Math.max(1, ...byCustomer.map((c) => c.revenue))
-  const maxSeller = Math.max(1, ...bySeller.map((c) => c.revenue))
   const history = selectedCustomer ? list.filter((o) => o.customer === selectedCustomer) : list
   const periodLabel: Record<Period, string> = { all: 'ทุกช่วงเวลา', today: 'วันนี้', week: '7 วันล่าสุด', month: 'เดือนนี้' }
 
@@ -516,21 +545,7 @@ function Insights({ orders, onOpenOrder }: { orders: Order[]; onOpenOrder: (o: O
       <Stat label="กำไรสุทธิ" value={`฿${money(profit)}`} sub={`อัตรากำไร ${money(revenue ? (profit / revenue) * 100 : 0)}%`} accent="#55aa73" />
       <Stat label="จำนวนออเดอร์" value={String(list.length)} sub={`เฉลี่ย ฿${money(list.length ? revenue / list.length : 0)} / ออเดอร์`} accent="#8a9aa8" />
     </div>
-    <div className="insights-grid">
-      <div className="panel insights-panel">
-        <div className="panel-title"><div><span className="section-kicker">SALESPERSON PERFORMANCE</span><h3>สรุปตามพนักงานขาย</h3></div></div>
-        {bySeller.length > 0 && <div className="insight-head"><span>พนักงาน</span><span>ออเดอร์</span><span>ยอดขาย</span><span>กำไร</span></div>}
-        {bySeller.map((s) => (
-          <div className="insight-row seller" key={s.key}>
-            <span className="feed-avatar">{s.key[0]}</span>
-            <span className="insight-name"><b>{s.key}</b><span className="bar"><i style={{ width: `${(s.revenue / maxSeller) * 100}%` }} /></span></span>
-            <span className="insight-num">{s.orders}</span>
-            <strong className="insight-num">฿{money(s.revenue)}</strong>
-            <strong className={`insight-num ${s.profit >= 0 ? 'positive' : 'negative'}`}>฿{money(s.profit)}</strong>
-          </div>
-        ))}
-        {!list.length && <p className="empty">ข้อมูลสรุปจะแสดงเมื่อมีออเดอร์</p>}
-      </div>
+    <div className="insights-single">
       <div className="panel insights-panel">
         <div className="panel-title"><div><span className="section-kicker">CUSTOMER SUMMARY</span><h3>สรุปตามลูกค้า</h3></div></div>
         {byCustomer.length > 0 && <div className="insight-head"><span>ลูกค้า</span><span>ออเดอร์</span><span>ยอดขาย</span><span>กำไร</span></div>}
