@@ -12,7 +12,9 @@
 // ชื่อชีตสินค้า: ถ้าไม่พบชื่อใดในรายการนี้ จะใช้ชีตแรกของไฟล์
 var PRODUCT_SHEET_NAMES = ['สินค้า', 'Products', 'products', 'Product'];
 var ORDER_SHEET = 'ออเดอร์';
-var IMAGE_FOLDER = 'แสงวัฒน์ POS - รูปสินค้า'; // โฟลเดอร์ใน Google Drive ที่เก็บรูปสินค้า
+// โฟลเดอร์ Google Drive ที่เก็บรูปสินค้า (ID จากลิงก์ drive.google.com/drive/folders/<ID>)
+var IMAGE_FOLDER_ID = '1Tva0JIfdJw6qOxY6Vj8l0FTjeUoxg9JS';
+var IMAGE_FOLDER = 'แสงวัฒน์ POS - รูปสินค้า'; // ใช้เมื่อเปิดโฟลเดอร์ด้านบนไม่ได้
 var VERSION = 3;
 var DAILY_SHEET = 'สรุปรายวัน';
 var CUSTOMER_SHEET = 'สรุปตามลูกค้า';
@@ -187,7 +189,12 @@ function saveProduct_(p) {
     if (field === 'status') v = stock > 0 ? 'มีสินค้า' : 'สินค้าหมด';
     else if (field === 'img') {
       v = String(p.img || '');
-      if (v.indexOf('data:') === 0) v = storeImage_(v, p.name); // รูปที่อัปโหลดจากเครื่อง → เก็บใน Google Drive แล้วใส่ลิงก์
+      if (v.indexOf('data:') === 0) {
+        // รูปที่อัปโหลดจากเครื่อง → เก็บใน Google Drive แล้วใส่ลิงก์ (รูปเก่าของสินค้านี้ย้ายไปถังขยะ)
+        var oldUrl = String(sheet.getRange(row, cols.img + 1).getValue());
+        v = storeImage_(v, p.name, p.brand);
+        if (v) trashImage_(oldUrl);
+      }
       if (v.length > 40000) return;
     } else v = p[field];
     if (v === undefined || v === null) v = NUMBER_FIELDS.indexOf(field) >= 0 ? 0 : '';
@@ -203,21 +210,34 @@ function setProductImage_(id, img) {
   if (row < 0 || !img) return;
   var cell = sheet.getRange(row, cols.img + 1);
   if (String(cell.getValue()).trim() !== '') return; // มีรูปอยู่แล้ว ไม่ทับ
-  var url = String(img).indexOf('data:') === 0 ? storeImage_(img, id) : String(img);
+  var name = String(sheet.getRange(row, cols.name + 1).getValue());
+  var brand = cols.brand !== undefined ? String(sheet.getRange(row, cols.brand + 1).getValue()) : '';
+  var url = String(img).indexOf('data:') === 0 ? storeImage_(img, name, brand) : String(img);
   if (url) cell.setValue(url);
 }
 
 function imageFolder_() {
+  if (IMAGE_FOLDER_ID) {
+    try { return DriveApp.getFolderById(IMAGE_FOLDER_ID); } catch (err) { /* ไม่มีสิทธิ์เข้าโฟลเดอร์ → ใช้โฟลเดอร์สำรอง */ }
+  }
   var it = DriveApp.getFoldersByName(IMAGE_FOLDER);
   return it.hasNext() ? it.next() : DriveApp.createFolder(IMAGE_FOLDER);
 }
 
-/** บันทึกรูป (data URL) ลง Google Drive เปิดให้ทุกคนที่มีลิงก์ดูได้ และคืนลิงก์สำหรับแสดงในแอป */
-function storeImage_(dataUrl, name) {
+/**
+ * บันทึกรูป (data URL) ลง Google Drive เปิดให้ทุกคนที่มีลิงก์ดูได้ และคืนลิงก์สำหรับแสดงในแอป
+ * ชื่อไฟล์: <ชื่อสินค้า> - <แบรนด์> - <วันเวลา>.jpg  เช่น "ข้าวเหนียว - ตราเสือดำ - 2026-11-05 1430.jpg"
+ */
+function storeImage_(dataUrl, name, brand) {
   var m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(String(dataUrl));
   if (!m) return '';
   var ext = m[1].split('/')[1].replace('jpeg', 'jpg');
-  var blob = Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], String(name || 'product').slice(0, 60) + '-' + Date.now() + '.' + ext);
+  var clean = function (t) { return String(t || '').replace(/[\\/:*?"<>|#%]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80); };
+  var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyy-MM-dd HHmm');
+  var parts = [clean(name) || 'สินค้า'];
+  if (clean(brand)) parts.push(clean(brand));
+  parts.push(stamp);
+  var blob = Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], parts.join(' - ') + '.' + ext);
   var file = imageFolder_().createFile(blob);
   try {
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
@@ -225,6 +245,18 @@ function storeImage_(dataUrl, name) {
     // บางบัญชีองค์กรไม่อนุญาตให้แชร์สาธารณะ รูปจะยังถูกเก็บ แต่คนอื่นอาจเปิดไม่ได้
   }
   return 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w1000';
+}
+
+/** ย้ายรูปเก่าที่สคริปต์เคยอัปโหลดไปถังขยะ (เฉพาะไฟล์ในโฟลเดอร์รูปสินค้า) */
+function trashImage_(url) {
+  var m = /[?&]id=([\w-]+)/.exec(String(url || ''));
+  if (!m) return;
+  try {
+    var file = DriveApp.getFileById(m[1]);
+    var folderId = imageFolder_().getId();
+    var parents = file.getParents();
+    while (parents.hasNext()) if (parents.next().getId() === folderId) { file.setTrashed(true); return; }
+  } catch (err) { /* ไม่มีไฟล์ / ไม่มีสิทธิ์ – ข้ามไป */ }
 }
 
 function deleteProduct_(id) {
